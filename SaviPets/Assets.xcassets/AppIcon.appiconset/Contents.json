@@ -1,7 +1,7 @@
 {
   "images" : [
     {
-      "filename" : "SaviPets-iOS-Default-1024x1024@1x.png",
+      "filename" : "SaviPets-logo.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
@@ -13,7 +13,7 @@
           "value" : "dark"
         }
       ],
-      "filename" : "SaviPets-iOS-Dark-1024x1024@1x.png",
+      "filename" : "SaviPets-logoDark.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
@@ -25,7 +25,7 @@
           "value" : "tinted"
         }
       ],
-      "filename" : "SaviPets-iOS-TintedLight-1024x1024@1x.png",
+      "filename" : "SaviPets-logoTinted.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"

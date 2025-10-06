@@ -1,0 +1,195 @@
+// Firestore Security Rules aligned to SaviPets app data model
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(uid) { return isSignedIn() && request.auth.uid == uid; }
+    function userRole() {
+      return isSignedIn()
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+        : null;
+    }
+    function hasRole(r) { return userRole() == r; }
+    function isAdmin() {
+      return userRole() == 'admin' || userRole() == 'Admin';
+    }
+    function hasAnyRole(rs) { return userRole() in rs; }
+    function isParticipant(conversationId) {
+      return get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants.hasAny([request.auth.uid]);
+    }
+
+    // 1) Canonical user profile (top-level)
+    // Each user can read/write their own profile; admins can read any profile
+    // Also allow reading admin user profiles for chat functionality
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin() || (isSignedIn() && resource.data.role == 'admin');
+      allow write: if isOwner(uid);
+    }
+
+    // 2) Canvas artifacts - default policy
+    // Authenticated users can READ by default. WRITES are denied unless a more specific rule below allows it.
+    match /artifacts/{appId}/{document=**} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // 3) Private staff & pet data (per-user)
+    // Only the owner (or admin if desired) can read/write their private docs
+    match /artifacts/{appId}/users/{userId}/staff/{staffId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow write: if isOwner(userId) || isAdmin();
+    }
+    match /artifacts/{appId}/users/{userId}/pets/{petId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow write: if isOwner(userId) || isAdmin();
+    }
+
+    // 4) Public/shared shifts
+    // Read: any signed-in user
+    // Create/Delete: admin only
+    // Update: admin OR the assigned staff member updating their own shift
+    match /artifacts/{appId}/public/data/shifts/{shiftId} {
+      allow read: if isSignedIn();
+
+      allow create: if isAdmin();
+      allow delete: if isAdmin();
+
+      allow update: if hasRole('admin')
+                 || (isSignedIn() && resource.data.assignedStaffId == request.auth.uid);
+    }
+
+    // 5) Service Bookings
+    // Users can create and read their own bookings; admins can read all and update statuses.
+    match /serviceBookings/{bookingId} {
+      allow create: if isSignedIn() && request.resource.data.clientId == request.auth.uid;
+      allow read: if isSignedIn() && (resource.data.clientId == request.auth.uid || hasRole('admin'));
+      allow update: if isAdmin() || (isSignedIn() && resource.data.clientId == request.auth.uid);
+      allow delete: if hasRole('admin');
+    }
+
+    // 6) Visits/Clients/Inquiries/Conversations
+    // Sitters collection
+    match /sitters/{sitterId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+    match /visits/{visitId} {
+      allow read: if isSignedIn();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (isSignedIn() && resource.data.sitterId == request.auth.uid);
+    }
+
+    match /clients/{clientId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /inquiries/{inquiryId} {
+      allow create: if isSignedIn();
+      allow read, update, delete: if isAdmin();
+    }
+
+    // Enhanced conversation security
+    match /conversations/{conversationId} {
+      allow create: if isSignedIn();
+      allow read: if isAdmin() || isParticipant(conversationId);
+      allow update: if isAdmin() || isParticipant(conversationId)
+        && !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['participants', 'participantRoles', 'type']);
+      allow delete: if isAdmin();
+      
+      // Allow users to query conversations where they might be a participant
+      // This is needed for the arrayContains query to work
+      allow list: if isSignedIn();
+      
+      // Messages subcollection with enhanced security
+      match /messages/{messageId} {
+        allow read: if isAdmin() || isParticipant(conversationId);
+        allow create: if isSignedIn() && isParticipant(conversationId)
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.keys().hasAll(['senderId', 'text', 'timestamp', 'status']);
+        allow update: if isAdmin() || (isParticipant(conversationId) && resource.data.senderId == request.auth.uid)
+          && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['senderId', 'text', 'timestamp']);
+        allow delete: if isAdmin();
+      }
+      
+      // Typing indicators subcollection
+      match /typing/{typingId} {
+        allow read: if isAdmin() || isParticipant(conversationId);
+        allow create, update, delete: if isSignedIn() && isParticipant(conversationId)
+          && request.auth.uid == typingId;
+      }
+    }
+
+    // 9) Rate limiting and content validation (Cloud Functions recommended)
+    // Note: pendingMessages collection removed - using message-level status instead
+
+    // 7) Locations: allow each user to write their own location doc, and admins to read all.
+    match /locations/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow write: if isOwner(uid);
+    }
+
+    // 8) Public Profiles: world-readable minimal profile, user-writable their own doc
+    match /publicProfiles/{uid} {
+      allow read: if true;
+      allow write: if isOwner(uid);
+    }
+    
+    // 10) Enhanced security for new features
+    
+    // Message reactions validation
+    match /conversations/{conversationId}/messages/{messageId} {
+      // Allow users to add/remove reactions only if they're conversation participants
+      allow update: if isSignedIn() && isParticipant(conversationId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
+        && request.resource.data.reactions.keys().hasAll(['❤️', '👍', '👎', '😂', '😢', '😮']);
+    }
+    
+    // Unread count tracking - only allow updates to own counts
+    match /conversations/{conversationId} {
+      allow update: if isSignedIn() && isParticipant(conversationId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['unreadCounts', 'lastReadTimestamps'])
+        && request.resource.data.unreadCounts.keys().hasAll([request.auth.uid]);
+    }
+    
+    // Auto-response history - prevent tampering
+    match /conversations/{conversationId} {
+      allow update: if isSignedIn() && isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['autoResponseHistory', 'autoResponderSent']);
+    }
+    
+    // Content validation for messages (basic XSS prevention)
+    function isValidMessage(text) {
+      return text is string 
+        && text.size() <= 1000 
+        && !text.matches('.*<script.*>.*</script>.*')
+        && !text.matches('.*javascript:.*');
+    }
+    
+    // Apply content validation to message creation
+    match /conversations/{conversationId}/messages/{messageId} {
+      allow create: if isSignedIn() && isParticipant(conversationId)
+        && isValidMessage(request.resource.data.text)
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.keys().hasAll(['senderId', 'text', 'timestamp', 'status']);
+    }
+    
+    // 11) Admin-only operations
+    match /conversations/{conversationId}/messages/{messageId} {
+      // Only admins can approve/reject messages
+      allow update: if isAdmin() 
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'moderatedBy', 'moderatedAt', 'deliveryStatus', 'deliveredAt'])
+        && request.resource.data.status in ['sent', 'rejected', 'pending'];
+    }
+    
+    // 12) Audit logging (recommended to implement in Cloud Functions)
+    // Note: For production, implement audit logging in Cloud Functions
+    // to track all admin actions, message approvals, and security events
+  }
+}

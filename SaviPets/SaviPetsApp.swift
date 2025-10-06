@@ -23,6 +23,11 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 			assertionFailure("Missing Firebase clientID. Ensure GoogleService-Info.plist is included or set GIDClientID in Info.plist.")
 		}
 
+		// Request notification permission
+		Task {
+			await NotificationService.shared.requestNotificationPermission()
+		}
+
 		return true
 	}
 

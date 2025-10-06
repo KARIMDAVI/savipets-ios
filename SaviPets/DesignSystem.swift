@@ -3,6 +3,12 @@ import SwiftUI
 // MARK: - SaviPets Design System
 
 enum SPDesignSystem {
+    // MARK: Roles - canonical values used across the app and in Firestore
+    enum Roles {
+        static let petOwner: String = "petOwner"
+        static let petSitter: String = "petSitter"
+        static let admin: String = "admin"
+    }
     // MARK: Colors
     enum Colors {
         static let primary = Color(hex: "#FFD700")

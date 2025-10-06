@@ -32,6 +32,7 @@
 		3CAFC20E2E824DAB00E4CF04 /* FirebaseRemoteConfig in Frameworks */ = {isa = PBXBuildFile; productRef = 3CAFC20D2E824DAB00E4CF04 /* FirebaseRemoteConfig */; };
 		3CAFC2102E824DAB00E4CF04 /* FirebaseStorage in Frameworks */ = {isa = PBXBuildFile; productRef = 3CAFC20F2E824DAB00E4CF04 /* FirebaseStorage */; };
 		3CAFC2122E824DAB00E4CF04 /* FirebaseStorageCombine-Community in Frameworks */ = {isa = PBXBuildFile; productRef = 3CAFC2112E824DAB00E4CF04 /* FirebaseStorageCombine-Community */; };
+		3CF6D4D12E8B356F00DD9AF9 /* MapKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3CF6D4D02E8B356F00DD9AF9 /* MapKit.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -55,6 +56,7 @@
 		3C33BB332E80E38A00E3388F /* SaviPets.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SaviPets.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3C33BB442E80E38B00E3388F /* SaviPetsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SaviPetsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3C33BB4E2E80E38B00E3388F /* SaviPetsUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SaviPetsUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		3CF6D4D02E8B356F00DD9AF9 /* MapKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MapKit.framework; path = System/Library/Frameworks/MapKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -113,6 +115,7 @@
 				3CAFC1E62E824DAB00E4CF04 /* FirebaseAI in Frameworks */,
 				3CAFC2002E824DAB00E4CF04 /* FirebaseFunctions in Frameworks */,
 				3CAFC20E2E824DAB00E4CF04 /* FirebaseRemoteConfig in Frameworks */,
+				3CF6D4D12E8B356F00DD9AF9 /* MapKit.framework in Frameworks */,
 				3CAFC1F82E824DAB00E4CF04 /* FirebaseCrashlytics in Frameworks */,
 				3CAFC1F02E824DAB00E4CF04 /* FirebaseAppDistribution-Beta in Frameworks */,
 				3CAFC2122E824DAB00E4CF04 /* FirebaseStorageCombine-Community in Frameworks */,
@@ -144,6 +147,7 @@
 				3C33BB352E80E38A00E3388F /* SaviPets */,
 				3C33BB472E80E38B00E3388F /* SaviPetsTests */,
 				3C33BB512E80E38B00E3388F /* SaviPetsUITests */,
+				3CF6D4CF2E8B356F00DD9AF9 /* Frameworks */,
 				3C33BB342E80E38A00E3388F /* Products */,
 			);
 			sourceTree = "<group>";
@@ -156,6 +160,14 @@
 				3C33BB4E2E80E38B00E3388F /* SaviPetsUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		3CF6D4CF2E8B356F00DD9AF9 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				3CF6D4D02E8B356F00DD9AF9 /* MapKit.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -370,9 +382,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = SaviPets/SaviPets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = XVVX64JK45;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -388,7 +399,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.budgo.SaviPets;
+				PRODUCT_BUNDLE_IDENTIFIER = com.saviesa.SaviPets;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -405,9 +416,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = SaviPets/SaviPets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = XVVX64JK45;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -423,7 +433,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.budgo.SaviPets;
+				PRODUCT_BUNDLE_IDENTIFIER = com.saviesa.SaviPets;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -469,7 +479,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = XVVX64JK45;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -494,6 +504,8 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
+				STRIP_DEBUG_SYMBOLS_DURING_COPY = NO;
+				STRIP_INSTALLED_PRODUCT = NO;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -551,6 +563,8 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
+				STRIP_DEBUG_SYMBOLS_DURING_COPY = NO;
+				STRIP_INSTALLED_PRODUCT = NO;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};
@@ -566,7 +580,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.budgo.SaviPetsTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.saviesa.SaviPetsTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -588,7 +602,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.budgo.SaviPetsTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.saviesa.SaviPetsTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -608,7 +622,7 @@
 				DEVELOPMENT_TEAM = XVVX64JK45;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.budgo.SaviPetsUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.saviesa.SaviPetsUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -628,7 +642,7 @@
 				DEVELOPMENT_TEAM = XVVX64JK45;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.budgo.SaviPetsUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.saviesa.SaviPetsUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;

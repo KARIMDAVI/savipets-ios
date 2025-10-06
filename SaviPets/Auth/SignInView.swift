@@ -1,21 +1,21 @@
 import SwiftUI
-import AuthenticationServices
-import GoogleSignIn
 import UIKit
 import FirebaseCore
-import FirebaseAuth
-import CryptoKit
-import Security
 
 struct SignInView: View {
 	@EnvironmentObject var appState: AppState
 	@Environment(\.colorScheme) private var colorScheme
-	@State private var email: String = ""
-	@State private var password: String = ""
-	@State private var isLoading: Bool = false
-	@State private var errorMessage: String? = nil
+	@StateObject private var authViewModel: AuthViewModel
+	@StateObject private var oauthService: OAuthService
 	@State private var showSignUp: Bool = false
-    @State private var currentNonce: String? = nil
+	
+	init() {
+		// Initialize with dependencies - will be properly injected in real usage
+		let authService: AuthServiceProtocol = FirebaseAuthService()
+		let appState = AppState()
+		self._authViewModel = StateObject(wrappedValue: AuthViewModel(authService: authService, appState: appState))
+		self._oauthService = StateObject(wrappedValue: OAuthService(authService: authService, appState: appState))
+	}
 
 	var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -47,18 +47,22 @@ struct SignInView: View {
 				Spacer()
 
 				VStack(spacing: SPDesignSystem.Spacing.m) {
-					FloatingTextField(title: "Email", text: $email, kind: .email, error: emailError)
-					FloatingTextField(title: "Password", text: $password, kind: .secure, error: passwordError)
+					FloatingTextField(title: "Email", text: $authViewModel.email, kind: .email, error: authViewModel.emailError)
+					FloatingTextField(title: "Password", text: $authViewModel.password, kind: .secure, error: authViewModel.passwordError)
 
-					if let errorMessage {
+					if let errorMessage = authViewModel.errorMessage ?? oauthService.errorMessage {
 						Text(errorMessage)
 							.font(SPDesignSystem.Typography.footnote())
 							.foregroundColor(SPDesignSystem.Colors.error)
 					}
 
-					SPButton(title: "Sign in", kind: .dark, isLoading: isLoading, systemImage: "lock.fill") {
-						signIn()
+					SPButton(title: "Sign in", kind: .dark, isLoading: authViewModel.isLoading || oauthService.isLoading, systemImage: "lock.fill") {
+						Task {
+							await authViewModel.signIn()
+						}
 					}
+					.accessibilityLabel("Sign In")
+					.accessibilityHint("Double tap to sign in with your email and password")
 
 					thirdPartyButtons
 
@@ -69,6 +73,8 @@ struct SignInView: View {
 							.foregroundColor(.black)
 					}
 					.glass()
+					.accessibilityLabel("Sign Up")
+					.accessibilityHint("Double tap to create a new account")
 				}
 				.padding()
 				.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -138,57 +144,24 @@ struct SignInView: View {
                 .signIn,
                 onRequest: { request in
                     request.requestedScopes = [.fullName, .email]
-                    let nonce = randomNonceString()
-                    currentNonce = nonce
-                    request.nonce = sha256(nonce)
                 },
                 onCompletion: { result in
-                    switch result {
-                    case .success(let auth):
-                        guard let appleIDCredential = auth.credential as? ASAuthorizationAppleIDCredential else { return }
-                        guard let nonce = currentNonce else { errorMessage = "Missing state"; return }
-                        guard let appleTokenData = appleIDCredential.identityToken,
-                              let idTokenString = String(data: appleTokenData, encoding: .utf8) else {
-                            errorMessage = "Unable to fetch Apple identity token"
-                            return
-                        }
-                        // FirebaseAuth: create an Apple OAuth credential
-                        let credential = OAuthProvider.appleCredential(
-                            withIDToken: idTokenString,
-                            rawNonce: nonce,
-                            fullName: appleIDCredential.fullName
-                        )
-                        Auth.auth().signIn(with: credential) { authResult, error in
-                            if let _ = error { errorMessage = "Sign in failed"; return }
-                            if let given = appleIDCredential.fullName?.givenName, let family = appleIDCredential.fullName?.familyName {
-                                let full = "\(given) \(family)".trimmingCharacters(in: .whitespaces)
-                                if !full.isEmpty { appState.displayName = full }
-                            }
-                            if appState.displayName == nil, let email = Auth.auth().currentUser?.email {
-                                appState.displayName = email.components(separatedBy: "@").first?
-                                    .replacingOccurrences(of: ".", with: " ")
-                                    .replacingOccurrences(of: "_", with: " ")
-                                    .replacingOccurrences(of: "-", with: " ")
-                                    .capitalized
-                            }
-                            appState.isAuthenticated = true
-                            appState.role = .petOwner
-                        }
-                    case .failure(let error):
-						let nsError = error as NSError
-						if nsError.domain == ASAuthorizationError.errorDomain && nsError.code == ASAuthorizationError.Code.canceled.rawValue {
-							errorMessage = "Sign in failed: User cancelled"
-						} else {
-							errorMessage = "Sign in failed"
-						}
+                    Task {
+                        await oauthService.signInWithApple()
                     }
                 }
             )
             .signInWithAppleButtonStyle(.black)
             .frame(height: 44)
             .cornerRadius(8)
+            .accessibilityLabel("Sign in with Apple")
+            .accessibilityHint("Double tap to sign in using your Apple ID")
 
-            Button(action: { googleSignIn() }) {
+            Button(action: { 
+                Task {
+                    await oauthService.signInWithGoogle()
+                }
+            }) {
                 HStack {
                     Spacer()
                     HStack(spacing: 8) {
@@ -204,154 +177,9 @@ struct SignInView: View {
                 .foregroundColor(.black)
             }
             .glass()
+            .accessibilityLabel("Sign in with Google")
+            .accessibilityHint("Double tap to sign in using your Google account")
         }
     }
 
-	private var emailError: String? {
-		if email.isEmpty { return nil }
-		return email.contains("@") ? nil : "Enter a valid email"
-	}
-
-	private var passwordError: String? {
-		if password.isEmpty { return nil }
-		return password.count >= 4 ? nil : "Minimum 4 characters"
-	}
-
-    private func signIn() {
-        guard emailError == nil, passwordError == nil, !email.isEmpty, !password.isEmpty else {
-            errorMessage = "Please enter valid email and password"
-            return
-        }
-        errorMessage = nil
-        isLoading = true
-        Task {
-            do {
-                let role = try await appState.authService.signIn(email: email, password: password)
-                await MainActor.run {
-                    appState.role = role
-                    appState.displayName = email.components(separatedBy: "@").first?
-                        .replacingOccurrences(of: ".", with: " ")
-                        .replacingOccurrences(of: "_", with: " ")
-                        .replacingOccurrences(of: "-", with: " ")
-                        .capitalized
-                    isLoading = false
-                }
-            } catch {
-                await MainActor.run {
-                    errorMessage = (error as? LocalizedError)?.errorDescription ?? "Sign in failed"
-                    isLoading = false
-                }
-            }
-        }
-    }
-
-    // MARK: - Google Sign-In
-    private func googleSignIn() {
-        errorMessage = nil
-        isLoading = true
-
-        guard let presentingVC = rootViewController() else {
-            isLoading = false
-            errorMessage = "Unable to present Google Sign-In"
-            return
-        }
-
-        // Ensure configuration is set (in case AppDelegate wasn't able to)
-        if GIDSignIn.sharedInstance.configuration == nil {
-            if let clientID = FirebaseApp.app()?.options.clientID {
-                GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID)
-            }
-        }
-
-        GIDSignIn.sharedInstance.signIn(withPresenting: presentingVC) { result, error in
-            if let _ = error {
-                isLoading = false
-                errorMessage = "Sign in failed"
-                return
-            }
-
-            guard let result = result else {
-                isLoading = false
-                errorMessage = "Sign in failed"
-                return
-            }
-
-            // Firebase credential exchange
-            guard let idTokenString = result.user.idToken?.tokenString else {
-                isLoading = false
-                errorMessage = "Missing Google ID token"
-                return
-            }
-            let accessTokenString = result.user.accessToken.tokenString
-
-            let credential = GoogleAuthProvider.credential(withIDToken: idTokenString, accessToken: accessTokenString)
-            Auth.auth().signIn(with: credential) { authResult, err in
-                isLoading = false
-                if let _ = err {
-                    errorMessage = "Sign in failed"
-                    return
-                }
-
-                // Display name from Google profile or email prefix
-                if let name = result.user.profile?.name, !name.isEmpty {
-                    appState.displayName = name
-                } else if let email = Auth.auth().currentUser?.email {
-                    appState.displayName = email.components(separatedBy: "@").first?
-                        .replacingOccurrences(of: ".", with: " ")
-                        .replacingOccurrences(of: "_", with: " ")
-                        .replacingOccurrences(of: "-", with: " ")
-                        .capitalized
-                }
-
-                appState.isAuthenticated = true
-                appState.role = .petOwner
-            }
-        }
-    }
-
-    private func rootViewController() -> UIViewController? {
-        let scenes = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-
-        let keyWindow = scenes
-            .flatMap { $0.windows }
-            .first(where: { $0.isKeyWindow })
-
-        var top = keyWindow?.rootViewController
-        while let presented = top?.presentedViewController {
-            top = presented
-        }
-        return top
-    }
-}
-
-// MARK: - Apple Sign In helpers
-private func sha256(_ input: String) -> String {
-    let inputData = Data(input.utf8)
-    let hashed = SHA256.hash(data: inputData)
-    return hashed.map { String(format: "%02x", $0) }.joined()
-}
-
-private func randomNonceString(length: Int = 32) -> String {
-    precondition(length > 0)
-    let charset: [Character] = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
-    var result = ""
-    var remainingLength = length
-
-    while remainingLength > 0 {
-        var randoms = [UInt8](repeating: 0, count: 16)
-        let status = SecRandomCopyBytes(kSecRandomDefault, randoms.count, &randoms)
-        if status != errSecSuccess {
-            fatalError("Unable to generate nonce. SecRandomCopyBytes failed with OSStatus \(status)")
-        }
-
-        randoms.forEach { random in
-            if remainingLength == 0 { return }
-            if random < charset.count {
-                result.append(charset[Int(random)])
-                remainingLength -= 1
-            }
-        }
-    }
-    return result
 }

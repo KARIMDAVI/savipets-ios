@@ -3,12 +3,6 @@ import SwiftUI
 import Combine
 import FirebaseAuth
 
-enum UserRole: String, Codable {
-    case petOwner
-    case petSitter
-    case admin
-}
-
 final class AppState: ObservableObject {
     @Published var isAuthenticated: Bool = false
     @Published var role: UserRole? = nil
@@ -48,9 +42,18 @@ final class AppState: ObservableObject {
                 Task { [weak self] in
                     guard let self else { return }
                     let r = try? await self.authService.getUserRole(uid: uid)
-                    await MainActor.run { self.role = r }
+                    await MainActor.run { 
+                        self.role = r
+                        print("🟢 AppState: Setting user role to: \(r?.rawValue ?? "nil")")
+                        // Also set the role in the chat service
+                        if let role = r {
+                            self.chatService.setCurrentUserRole(role)
+                            print("🟢 AppState: Called chatService.setCurrentUserRole(\(role.rawValue))")
+                        }
+                    }
                 }
             }
             .store(in: &cancellables)
     }
 }
+

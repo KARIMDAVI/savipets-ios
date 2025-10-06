@@ -1,11 +1,14 @@
 import SwiftUI
 import FirebaseAuth
+import FirebaseFirestore
 
 struct OwnerDashboardView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject var appState: AppState
     @State private var scrollOffset: CGFloat = 0
     @State private var baseline: CGFloat? = nil
+    @StateObject private var serviceBookings = ServiceBookingDataService()
+    @State private var navigateToBooking: Bool = false
 
     @State private var selectedTab: Int = 0
 
@@ -17,7 +20,8 @@ struct OwnerDashboardView: View {
             OwnerPetsView()
                 .tabItem { Label("My Pets", systemImage: "pawprint.fill") }
                 .tag(1)
-            Text("Bookings")
+            OwnerBookingsView()
+                .environmentObject(serviceBookings)
                 .tabItem { Label("Bookings", systemImage: "calendar") }
                 .tag(2)
             MessagesTab()
@@ -54,7 +58,6 @@ struct OwnerDashboardView: View {
                     quickActions
                     upcomingServices
                     petsCarousel
-                    activityFeed
                 }
                 .padding()
             }
@@ -71,29 +74,70 @@ struct OwnerDashboardView: View {
                     .allowsHitTesting(false)
             }
         }
+        .environmentObject(serviceBookings)
+        .onAppear {
+            if let uid = appState.authService.currentUser?.uid {
+                serviceBookings.listenToUserBookings(userId: uid)
+                serviceBookings.listenToVisitStatusChanges() // Add visit status sync
+            }
+        }
     }
 
     private var quickActions: some View {
         HStack(spacing: SPDesignSystem.Spacing.m) {
-            NavigationLink { BookServiceView() } label: {
+            Button(action: { navigateToBooking = true }) {
                 SPCard { Label("Book Service", systemImage: "calendar.badge.plus").font(.headline) }
             }
             Button(action: { callEmergency() }) {
                 SPCard { Label("Emergency", systemImage: "phone.fill").font(.headline) }
             }
         }
+        .sheet(isPresented: $navigateToBooking) {
+            NavigationStack {
+                BookServiceView()
+                    .environmentObject(serviceBookings)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { navigateToBooking = false }
+                        }
+                    }
+            }
+        }
     }
 
+    // MARK: Active Bookings Logic
+    private var activeBookings: [ServiceBooking] {
+        serviceBookings.userBookings.filter { booking in
+            // Show only active bookings: pending, approved, in_adventure, and completed
+            return booking.status == .pending || booking.status == .approved || booking.status == .inAdventure || booking.status == .completed
+        }.sorted { $0.scheduledDate > $1.scheduledDate }
+    }
+    
     private var upcomingServices: some View {
-        SPCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Upcoming Service")
-                    .font(SPDesignSystem.Typography.heading3())
-                HStack {
-                    Image(systemName: "clock").foregroundColor(.secondary)
-                    Text("Tomorrow 2:00 PM - 30 min Walk")
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Recent Activity")
+                .font(SPDesignSystem.Typography.heading3())
+
+            if activeBookings.isEmpty {
+                SPCard {
+                    VStack(spacing: 8) {
+                        Image(systemName: "clock")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                        Text("No active services")
+                            .font(.headline)
+                        Text("Complete bookings will be moved to your bookings history")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 80)
                 }
-                .foregroundColor(.secondary)
+            } else {
+                ForEach(Array(activeBookings.prefix(3))) { booking in
+                    BookingCardInline(booking: booking)
+                }
             }
         }
     }
@@ -101,29 +145,10 @@ struct OwnerDashboardView: View {
     private var petsCarousel: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("My Pets").font(SPDesignSystem.Typography.heading3())
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: SPDesignSystem.Spacing.m) {
-                    ForEach(0..<5) { _ in
-                        SPCard {
-                            VStack {
-                                RoundedRectangle(cornerRadius: 12).fill(Color.gray.opacity(0.2)).frame(height: 100)
-                                Text("Buddy")
-                                    .font(.headline)
-                            }
-                            .frame(width: 140)
-                        }
-                    }
-                }
-            }
+            OwnerPetsStrip()
         }
     }
 
-    private var activityFeed: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Recent Activity").font(SPDesignSystem.Typography.heading3())
-            ForEach(0..<3) { _ in SPCard { Text("No recent activity").foregroundColor(.secondary) } }
-        }
-    }
 
     // MARK: Services Section
     private var servicesSection: some View {
@@ -195,10 +220,85 @@ struct OwnerDashboardView: View {
     }
 }
 
+// MARK: - Inline booking card for dashboard
+private struct BookingCardInline: View {
+    let booking: ServiceBooking
+    var body: some View {
+        SPCard {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(booking.serviceType).font(.headline)
+                    HStack(spacing: 8) {
+                        Text(booking.scheduledDate.formatted(date: .abbreviated, time: .omitted))
+                            .foregroundColor(.secondary)
+                        Text("at \(booking.scheduledTime)")
+                            .foregroundColor(.secondary)
+                    }
+                    .font(.subheadline)
+                    if !booking.pets.isEmpty {
+                        HStack(spacing: 6) {
+                            Image(systemName: "pawprint.fill").font(.caption).foregroundColor(.secondary)
+                            Text(booking.pets.joined(separator: ", "))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                Spacer()
+                HStack(spacing: 6) {
+                    Circle().fill(booking.status.color).frame(width: 8, height: 8)
+                    Text(booking.status.displayName)
+                        .font(.caption).fontWeight(.semibold)
+                        .foregroundColor(booking.status.color)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(booking.status.color.opacity(0.1))
+                .cornerRadius(8)
+            }
+        }
+    }
+}
+
+private struct OwnerPetsStrip: View {
+    @State private var pets: [PetDataService.Pet] = []
+    private let svc = PetDataService()
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: SPDesignSystem.Spacing.m) {
+                ForEach(pets) { pet in
+                    VStack {
+                        // Reuse the compact grid card from OwnerPetsView
+                        // Wrapped to a fixed width for horizontal strip
+                        PetGridCard(name: pet.name, photoURL: pet.photoURL)
+                            .frame(width: 140)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .task { await reload() }
+        .onAppear { Task { await reload() } }
+        .onReceive(NotificationCenter.default.publisher(for: .petsDidChange)) { _ in
+            Task { await reload() }
+        }
+    }
+
+    @MainActor
+    private func reload() async {
+        do { pets = try await svc.listPets() } catch { pets = [] }
+    }
+}
+
 private struct MessagesTab: View {
     @EnvironmentObject var chat: ChatService
+    @EnvironmentObject var appState: AppState
     @State private var seeded: Bool = false
-    @State private var showChat: Bool = false
+    @State private var showChat: Bool = false {
+        didSet {
+            print("showChat changed to: \(showChat)")
+        }
+    }
     @State private var seedText: String = ""
     @State private var selectedConversationId: String? = nil
 
@@ -206,16 +306,24 @@ private struct MessagesTab: View {
         NavigationStack {
             List {
                 Section("Pinned") {
-                    Button(action: { showChat = true }) {
-                        HStack {
-                            Image(systemName: "pin.fill").foregroundColor(.orange)
-                            VStack(alignment: .leading) {
-                                Text("SaviPets-Admin").font(.headline)
-                                Text("Auto-response: We'll be in touch ASAP.")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
+                    HStack {
+                        Image(systemName: "pin.fill").foregroundColor(.orange)
+                        VStack(alignment: .leading) {
+                            Text("SaviPets-Admin").font(.headline)
+                            Text("Contact Us - Get help instantly")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .foregroundColor(.accentColor)
+                            .font(.caption)
+                    }
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showChat = true 
                         }
                     }
                 }
@@ -223,11 +331,13 @@ private struct MessagesTab: View {
                     ForEach(chat.conversations) { convo in
                         Button(action: { selectedConversationId = convo.id }) {
                             VStack(alignment: .leading) {
-                                Text(convo.participants.joined(separator: ", "))
+                                Text(conversationDisplayName(for: convo))
                                     .font(.headline)
-                                Text(convo.lastMessage)
+                                    .lineLimit(1)
+                                Text(convo.lastMessage.isEmpty ? "No messages yet" : convo.lastMessage)
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
+                                    .lineLimit(2)
                             }
                         }
                     }
@@ -239,7 +349,16 @@ private struct MessagesTab: View {
             }
             .onAppear { chat.listenToMyConversations() }
             .sheet(isPresented: $showChat) {
-                NavigationStack { AdminInquiryChatView(initialText: seedText.isEmpty ? "Hello" : seedText) }
+                NavigationStack { 
+                    AdminInquiryChatView(
+                        initialText: seedText.isEmpty ? "Hello" : seedText,
+                        currentUserRole: appState.role
+                    )
+                    .environmentObject(chat)
+                }
+                .onAppear {
+                    print("AdminInquiryChatView sheet appeared")
+                }
             }
             .sheet(item: Binding(get: {
                 selectedConversationId.map { ChatSheetId(id: $0) }
@@ -251,40 +370,446 @@ private struct MessagesTab: View {
             }
         }
     }
+    
+    // MARK: - Helper Methods
+    
+    private func conversationDisplayName(for conversation: Conversation) -> String {
+        guard let currentUserId = Auth.auth().currentUser?.uid else {
+            return "Unknown Chat"
+        }
+        
+        // If it's a pinned conversation, use the pinned name
+        if conversation.isPinned, let pinnedName = conversation.pinnedName {
+            return pinnedName
+        }
+        
+        // Get other participants (excluding current user)
+        let otherParticipants = conversation.participants.filter { $0 != currentUserId }
+        
+        if otherParticipants.isEmpty {
+            return "Unknown Chat"
+        }
+        
+        // Get display names for other participants
+        let otherNames = otherParticipants.map { chat.displayName(for: $0) }
+        
+        // If it's a group chat (more than 2 participants), show "Group Chat"
+        if otherParticipants.count > 1 {
+            return "Group Chat"
+        }
+        
+        // For 1-on-1 chats, show the other person's name
+        let displayName = otherNames.first ?? "Unknown User"
+        
+        // Truncate very long names
+        if displayName.count > 20 {
+            return String(displayName.prefix(17)) + "..."
+        }
+        
+        return displayName
+    }
 }
 
 struct ChatSheetId: Identifiable { let id: String }
 
-struct ConversationChatView: View {
-    let conversationId: String
-    @EnvironmentObject var chat: ChatService
-    @State private var input: String = ""
+// MARK: - Owner Bookings Management View
+struct OwnerBookingsView: View {
+    @EnvironmentObject var serviceBookings: ServiceBookingDataService
+    @State private var selectedFilter: BookingFilter = .all
+    @State private var searchText: String = ""
+    
+    enum BookingFilter: String, CaseIterable {
+        case all = "All"
+        case upcoming = "Upcoming"
+        case completed = "Completed"
+        case cancelled = "Cancelled"
+        
+        var icon: String {
+            switch self {
+            case .all: return "list.bullet"
+            case .upcoming: return "clock"
+            case .completed: return "checkmark.circle"
+            case .cancelled: return "xmark.circle"
+            }
+        }
+    }
+    
+    private var filteredBookings: [ServiceBooking] {
+        var bookings = serviceBookings.userBookings
+        if !searchText.isEmpty {
+            bookings = bookings.filter { booking in
+                booking.serviceType.localizedCaseInsensitiveContains(searchText) ||
+                booking.pets.joined().localizedCaseInsensitiveContains(searchText) ||
+                booking.specialInstructions?.localizedCaseInsensitiveContains(searchText) == true
+            }
+        }
+        
+        switch selectedFilter {
+        case .all:
+            return bookings.sorted { $0.scheduledDate > $1.scheduledDate }
+        case .upcoming:
+            return bookings.filter { $0.status == .pending || $0.status == .approved }
+                .sorted { $0.scheduledDate < $1.scheduledDate }
+        case .completed:
+            return bookings.filter { $0.status == .completed }
+                .sorted { $0.scheduledDate > $1.scheduledDate }
+        case .cancelled:
+            return bookings.filter { $0.status == .cancelled }
+                .sorted { $0.scheduledDate > $1.scheduledDate }
+        }
+    }
+    
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // Search bar
+                SearchBar(text: $searchText, placeholder: "Search bookings...")
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                
+                // Filter segmented control
+                Picker("Filter", selection: $selectedFilter) {
+                    ForEach(BookingFilter.allCases, id: \.self) { filter in
+                        Label(filter.rawValue, systemImage: filter.icon).tag(filter)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+                
+                // Bookings list
+                if filteredBookings.isEmpty {
+                    EmptyStateView(filter: selectedFilter, searchText: searchText)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: SPDesignSystem.Spacing.m) {
+                            ForEach(filteredBookings) { booking in
+                                BookingDetailCard(booking: booking)
+                            }
+                        }
+                        .padding()
+                    }
+                }
+            }
+            .navigationTitle("My Bookings")
+            .navigationBarTitleDisplayMode(.large)
+        }
+    }
+}
 
+// MARK: - Booking Detail Card
+struct BookingDetailCard: View {
+    let booking: ServiceBooking
+    @State private var showingDetails = false
+    @State private var showingCancelConfirm = false
+    @State private var showingReschedule = false
+    
+    private var isUpcoming: Bool {
+        booking.status == .pending || booking.status == .approved
+    }
+    
+    private var canReschedule: Bool {
+        isUpcoming && booking.status == .approved
+    }
+    
+    private var canCancel: Bool {
+        isUpcoming
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
-            List(chat.messages[conversationId] ?? []) { msg in
-                HStack {
-                    if msg.senderId != (Auth.auth().currentUser?.uid ?? "") { Spacer() }
-                    Text(msg.text)
-                        .padding(10)
-                        .background(Color.gray.opacity(0.15))
-                        .cornerRadius(10)
-                    if msg.senderId == (Auth.auth().currentUser?.uid ?? "") { Spacer() }
+            // Main card content (tappable)
+            Button(action: { showingDetails = true }) {
+                VStack(alignment: .leading, spacing: 12) {
+                    // Header with status
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(booking.serviceType)
+                                .font(.headline)
+                                .foregroundColor(.primary)
+                            Text(formatBookingDate())
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        StatusBadge(status: booking.status)
+                    }
+                    
+                    // Service details
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !booking.pets.isEmpty {
+                            HStack(spacing: 6) {
+                                Image(systemName: "pawprint.fill")
+                                    .foregroundColor(.secondary)
+                                Text(booking.pets.joined(separator: ", "))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        
+                        if let sitter = booking.sitterName {
+                            HStack(spacing: 6) {
+                                Image(systemName: "person.fill")
+                                    .foregroundColor(.secondary)
+                                Text("Sitter: \(sitter)")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        
+                        if let instruction = booking.specialInstructions, !instruction.isEmpty {
+                            HStack(alignment: .top, spacing: 6) {
+                                Image(systemName: "note.text")
+                                    .foregroundColor(.secondary)
+                                    .padding(.top, 2)
+                                Text(instruction)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock")
+                                .foregroundColor(.secondary)
+                            Text("Duration: \(booking.duration) minutes")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    // Action buttons row (only for upcoming bookings)
+                    if canReschedule || canCancel {
+                        HStack(spacing: 12) {
+                            if canReschedule {
+                                Button("Reschedule") { showingReschedule = true }
+                                    .foregroundColor(SPDesignSystem.Colors.primary)
+                                    .buttonStyle(.borderless)
+                            }
+                            
+                            if canCancel {
+                                Button("Cancel") { showingCancelConfirm = true }
+                                    .foregroundColor(.red)
+                                    .buttonStyle(.borderless)
+                            }
+                            
+                            Spacer()
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .padding()
+                .background(Color(UIColor.systemBackground))
+                .cornerRadius(12)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color(UIColor.systemGray5), lineWidth: 1)
+                )
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+        .sheet(isPresented: $showingDetails) {
+            BookingDetailsSheet(booking: booking)
+        }
+        .sheet(isPresented: $showingCancelConfirm) {
+            CancelBookingSheet(booking: booking)
+        }
+        .sheet(isPresented: $showingReschedule) {
+            RescheduleBookingSheet(booking: booking)
+        }
+    }
+    
+    private func formatBookingDate() -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        formatter.locale = Locale(identifier: "en_US")
+        
+        let scheduledTime = booking.scheduledTime
+        if !scheduledTime.isEmpty {
+            // Combine date and time string for display
+            return "\(formatter.string(from: booking.scheduledDate)) at \(scheduledTime)"
+        } else {
+            return formatter.string(from: booking.scheduledDate)
+        }
+    }
+}
+
+// MARK: - Status Badge
+struct StatusBadge: View {
+    let status: ServiceBooking.BookingStatus
+    
+    var body: some View {
+        Text(status.displayName)
+            .font(.caption)
+            .fontWeight(.semibold)
+            .foregroundColor(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(status.color)
+            .cornerRadius(8)
+    }
+}
+
+// MARK: - Empty State View
+struct EmptyStateView: View {
+
+    let filter: OwnerBookingsView.BookingFilter
+    let searchText: String
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: emptyIcon)
+                .font(.system(size: 50))
+                .foregroundColor(.secondary)
+            
+            Text(emptyTitle)
+                .font(.headline)
+                .foregroundColor(.primary)
+            
+            Text(emptyMessage)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    private var emptyIcon: String {
+        if !searchText.isEmpty { return "magnifyingglass" }
+        switch filter {
+        case .all: return "calendar"
+        case .upcoming: return "clock"
+        case .completed: return "checkmark.circle"
+        case .cancelled: return "xmark.circle"
+        }
+    }
+    
+    private var emptyTitle: String {
+        if !searchText.isEmpty { return "No results found" }
+        switch filter {
+        case .all: return "No bookings yet"
+        case .upcoming: return "No upcoming bookings"
+        case .completed: return "No completed bookings"
+        case .cancelled: return "No cancelled bookings"
+        }
+    }
+    
+    private var emptyMessage: String {
+        if !searchText.isEmpty { return "Try adjusting your search terms" }
+        switch filter {
+        case .all: return "Get started by booking your first service"
+        case .upcoming: return "All of your approved bookings will appear here"
+        case .completed: return "Completed services will show up here for your reference"
+        case .cancelled: return "Cancelled bookings will be listed here"
+        }
+    }
+}
+
+// MARK: - Search Bar
+struct SearchBar: View {
+    @Binding var text: String
+    let placeholder: String
+    
+    var body: some View {
+        HStack {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(.secondary)
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+            if !text.isEmpty {
+                Button(action: { text = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
                 }
             }
-            .listStyle(.plain)
-            .onAppear { chat.listenToMessages(conversationId: conversationId) }
+        }
+        .padding(8)
+        .background(Color(UIColor.systemGray6))
+        .cornerRadius(8)
+    }
+}
 
-            HStack(spacing: 8) {
-                TextField("Message", text: $input).textFieldStyle(.roundedBorder)
-                Button("Send") {
-                    Task { try? await chat.sendMessage(conversationId: conversationId, text: input); input = "" }
+// MARK: - Booking Details Sheet (placeholder for now)
+struct BookingDetailsSheet: View {
+    let booking: ServiceBooking
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Booking ID: \(booking.id)")
+                    Text("Service: \(booking.serviceType)")
+                    Text("Status: \(booking.status.displayName)")
+                    Text("Date: \(booking.scheduledDate, style: .date)")
+                    Text("Pets: \(booking.pets.joined(separator: ", "))")
+                    if let instructions = booking.specialInstructions {
+                        Text("Instructions: \(instructions)")
+                    }
                 }
-                .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .padding()
+            }
+            .navigationTitle("Booking Details")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Cancel Booking Sheet (placeholder for now)
+struct CancelBookingSheet: View {
+    let booking: ServiceBooking
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 16) {
+                Text("Are you sure you want to cancel this booking?")
+                    .font(.headline)
+                Text("This action cannot be undone.")
+                    .foregroundColor(.secondary)
+                Spacer()
             }
             .padding()
+            .navigationTitle("Cancel Booking")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
         }
-        .navigationTitle("Chat")
+    }
+}
+
+// MARK: - Reschedule Booking Sheet (placeholder for now)
+struct RescheduleBookingSheet: View {
+    let booking: ServiceBooking
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 16) {
+                Text("Reschedule your booking")
+                    .font(.headline)
+                Text("Feature coming soon!")
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("Reschedule")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }
 
@@ -297,6 +822,7 @@ struct OwnerDashboardView_Previews: PreviewProvider {
         appState.displayName = "Alex"
         return OwnerDashboardView()
             .environmentObject(appState)
+            .environmentObject(appState.chatService)
             .previewDisplayName("Owner Dashboard")
     }
 }

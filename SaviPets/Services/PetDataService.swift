@@ -10,7 +10,7 @@ final class PetDataService {
     // IMPORTANT: Must match your Canvas __app_id
     private let appId: String
 
-    init(appId: String = "1:367657554735:ios:05871c65559a6a40b007da") {
+    init(appId: String = AppConstants.Firebase.appId) {
         self.appId = appId
     }
 
@@ -79,9 +79,10 @@ final class PetDataService {
     @discardableResult
     func derivePetCount() async throws -> Int {
         let uid = try currentUserId()
-        let snap = try await petsCollectionRef(for: uid).getDocuments()
-        let count = snap.documents.count
-        return count
+        return try await NetworkRetryHelper.retry {
+            let snap = try await petsCollectionRef(for: uid).getDocuments()
+            return snap.documents.count
+        }
     }
 
     // MARK: - Add Pet
@@ -117,39 +118,41 @@ final class PetDataService {
     // MARK: - List Pets (helper)
     func listPets() async throws -> [Pet] {
         let uid = try currentUserId()
-        let snap = try await petsCollectionRef(for: uid).getDocuments()
-        return snap.documents.compactMap { doc in
-            let data = doc.data()
-            guard
-                let name = data["name"] as? String,
-                let species = data["species"] as? String
-            else {
-                return nil
-            }
+        return try await NetworkRetryHelper.retry {
+            let snap = try await petsCollectionRef(for: uid).getDocuments()
+            return snap.documents.compactMap { doc in
+                let data = doc.data()
+                guard
+                    let name = data["name"] as? String,
+                    let species = data["species"] as? String
+                else {
+                    return nil
+                }
 
-            let birthdate: Date
-            if let ts = data["birthdate"] as? Timestamp {
-                birthdate = ts.dateValue()
-            } else if let date = data["birthdate"] as? Date {
-                birthdate = date
-            } else {
-                return nil
-            }
+                let birthdate: Date
+                if let ts = data["birthdate"] as? Timestamp {
+                    birthdate = ts.dateValue()
+                } else if let date = data["birthdate"] as? Date {
+                    birthdate = date
+                } else {
+                    return nil
+                }
 
-            return Pet(
-                id: doc.documentID,
-                name: name,
-                species: species,
-                breed: data["breed"] as? String,
-                color: data["color"] as? String,
-                sex: data["sex"] as? String,
-                vaccinated: data["vaccinated"] as? Bool,
-                birthdate: birthdate,
-                photoURL: data["photoURL"] as? String,
-                eventNote: data["eventNote"] as? String,
-                privateNote: data["privateNote"] as? String,
-                vetInfo: data["vetInfo"] as? String
-            )
+                return Pet(
+                    id: doc.documentID,
+                    name: name,
+                    species: species,
+                    breed: data["breed"] as? String,
+                    color: data["color"] as? String,
+                    sex: data["sex"] as? String,
+                    vaccinated: data["vaccinated"] as? Bool,
+                    birthdate: birthdate,
+                    photoURL: data["photoURL"] as? String,
+                    eventNote: data["eventNote"] as? String,
+                    privateNote: data["privateNote"] as? String,
+                    vetInfo: data["vetInfo"] as? String
+                )
+            }
         }
     }
 
@@ -190,8 +193,10 @@ final class PetDataService {
 
     // MARK: - Profile existence check
     func userProfileExists(uid: String) async throws -> Bool {
-        let doc = try await db.collection("users").document(uid).getDocument()
-        return doc.exists
+        return try await NetworkRetryHelper.retry {
+            let doc = try await db.collection("users").document(uid).getDocument()
+            return doc.exists
+        }
     }
 
     // MARK: - Upload Photo
@@ -238,7 +243,39 @@ final class PetDataService {
     // MARK: - Update Pet
     func updatePet(petId: String, fields: [String: Any]) async throws {
         let uid = try currentUserId()
-        let doc = petsCollectionRef(for: uid).document(petId)
-        try await doc.setData(fields, merge: true)
+        try await NetworkRetryHelper.retry {
+            let doc = petsCollectionRef(for: uid).document(petId)
+            try await doc.setData(fields, merge: true)
+        }
+    }
+
+    // MARK: - Delete Pet
+    func deletePet(petId: String) async throws {
+        let uid = try currentUserId()
+        try await NetworkRetryHelper.retry {
+            try await petsCollectionRef(for: uid).document(petId).delete()
+        }
+        // Broadcast change so all views refresh (OwnerPetsView & OwnerDashboardView listen to petsDidChange)
+        await MainActor.run {
+            NotificationCenter.default.post(name: .petsDidChange, object: nil)
+        }
+    }
+
+    // MARK: - Admin/Service helpers (cross-user access)
+    /// Fetches photo URLs for the given user's pets matching any of the provided names.
+    /// Intended for admin/service flows where the current auth user is not the pet owner.
+    func fetchPetPhotoURLs(forUserId userId: String, matchingNames names: [String]) async throws -> [String] {
+        guard !names.isEmpty else { return [] }
+        let snap = try await petsCollectionRef(for: userId).getDocuments()
+        let wanted = Set(names.map { $0.lowercased() })
+        var urls: [String] = []
+        for doc in snap.documents {
+            let data = doc.data()
+            guard let nm = data["name"] as? String else { continue }
+            if wanted.contains(nm.lowercased()), let url = data["photoURL"] as? String, !url.isEmpty {
+                urls.append(url)
+            }
+        }
+        return urls
     }
 }

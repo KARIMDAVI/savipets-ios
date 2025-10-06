@@ -20,10 +20,11 @@ struct PlayerLayerView: UIViewRepresentable {
             v.playerLayer.player = player
             v.playerLayer.videoGravity = .resizeAspectFill
 
-            NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: player.currentItem, queue: .main) { _ in
+            let observer = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: player.currentItem, queue: .main) { _ in
                 player.seek(to: .zero)
                 player.play()
             }
+            v.setObserver(observer)
             player.playImmediately(atRate: 1.0)
         }
         return v
@@ -34,9 +35,23 @@ struct PlayerLayerView: UIViewRepresentable {
     class PlayerContainerView: UIView {
         override static var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+        private var observer: NSObjectProtocol?
+        
         override func layoutSubviews() {
             super.layoutSubviews()
             playerLayer.frame = bounds
+        }
+        
+        deinit {
+            if let observer = observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            playerLayer.player?.pause()
+            playerLayer.player = nil
+        }
+        
+        func setObserver(_ observer: NSObjectProtocol?) {
+            self.observer = observer
         }
     }
 }
