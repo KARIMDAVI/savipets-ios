@@ -1,0 +1,114 @@
+---
+alwaysApply: false
+---
+Add these as core role and access rules for my app. Apply them automatically in all logic, Firestore queries, and UI rendering. Always check the user role before showing or enabling actions.
+
+Add this to the project context and follow it in all files:
+
+⸻
+
+Project Role Rules for SaviPets
+
+Roles: PetOwner, PetSitter, Admin
+Access:
+	•	Owners can only access their pets, bookings, and messages.
+	•	Sitters can only access assigned or available jobs.
+	•	Admin can access all data.
+
+UI Behavior:
+	•	Dashboard, buttons, and navigation must match the user role.
+	•	Firestore queries should always filter by uid and role unless admin.
+	•	Never show actions that the current role doesn’t have permission for.
+
+⸻
+
+Apply this automatically across all related files.
+
+Always check and enforce the user’s role before performing actions, reading data, or showing UI components. Only Admins have unrestricted access.
+
+### 🧩 Role Definitions
+- **PetOwner**: Regular user who can add pets, request services, view bookings, track sitter visits, and chat with sitters and admin.
+- **PetSitter**: Service provider who can view assigned or available visits, start/end visits, update visit progress, and chat with clients/admin.
+- **Admin**: Full control; can manage users, view all visits, approve/reject sitter applications, and monitor app activity.
+
+### 🔒 Access Rules
+- **PetOwner**: 
+  - Can only view and edit their own pets and bookings.
+  - Cannot see other users' data unless involved in a booking.
+  - Can message sitters or admin.
+
+- **PetSitter**:
+  - Can only view jobs assigned to them or available jobs in their area.
+  - Cannot modify pet data or owner data.
+  - Can update visit progress, status, and send messages.
+
+- **Admin**:
+  - Has access to all collections and documents.
+  - Can edit or delete any record if needed.
+  - Can view all messages and visit logs.
+
+
+  ### ⚙️ Behavior Rules
+- Always check the current user’s role before displaying actions or buttons (e.g., "Start Visit", "Request Visit").
+- Each Firestore query must be **filtered by role and user ID** unless user is Admin.
+- Navigation should display:
+  - PetOwnerDashboard for Owners
+  - SitterDashboard for Sitters
+  - AdminDashboard for Admins
+- When in doubt, ask.
+
+Add these as core role and access rules for my app. Apply them automatically in all logic, Firestore queries, and UI rendering. Always check the user role before showing or enabling actions.
+
+Add this to the project context and follow it in all files:
+
+⸻
+
+Project Role Rules for SaviesaWalks
+
+Roles: PetOwner, PetSitter, Admin
+Access:
+	•	Owners can only access their pets, bookings, and messages.
+	•	Sitters can only access assigned or available jobs.
+	•	Admin can access all data.
+
+UI Behavior:
+	•	Dashboard, buttons, and navigation must match the user role.
+	•	Firestore queries should always filter by uid and role unless admin.
+	•	Never show actions that the current role doesn’t have permission for.
+
+⸻
+
+Apply this automatically across all related files.
+
+
+### 🧩 Role Definitions
+- **PetOwner**: Regular user who can add pets, request services, view bookings, track sitter visits, and chat with sitters and admin.
+- **PetSitter**: Service provider who can view assigned or available visits, start/end visits, update visit progress, and chat with clients/admin.
+- **Admin**: Full control; can manage users, view all visits, approve/reject sitter applications, and monitor app activity.
+
+### 🔒 Access Rules
+- **PetOwner**: 
+  - Can only view and edit their own pets and bookings.
+  - Cannot see other users' data unless involved in a booking.
+  - Can message sitters or admin.
+
+- **PetSitter**:
+  - Can only view jobs assigned to them or available jobs in their area.
+  - Cannot modify pet data or owner data.
+  - Can update visit progress, status, and send messages.
+
+- **Admin**:
+  - Has access to all collections and documents.
+  - Can edit or delete any record if needed.
+  - Can view all messages and visit logs.
+
+
+  ### ⚙️ Behavior Rules
+- Always check the current user’s role before displaying actions or buttons (e.g., "Start Visit", "Request Visit").
+- Each Firestore query must be **filtered by role and user ID** unless user is Admin.
+- Navigation should display:
+  - PetOwnerDashboard for Owners
+  - SitterDashboard for Sitters
+  - AdminDashboard for Admins
+- When in doubt, ask.
+

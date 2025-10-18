@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SwiftUI
 import Combine
 import AuthenticationServices
@@ -15,6 +16,7 @@ final class OAuthService: ObservableObject {
     private let authService: AuthServiceProtocol
     private let appState: AppState
     private var currentNonce: String?
+    private var appleSignInDelegate: AppleSignInDelegate?
     
     init(authService: AuthServiceProtocol, appState: AppState) {
         self.authService = authService
@@ -22,6 +24,46 @@ final class OAuthService: ObservableObject {
     }
     
     // MARK: - Apple Sign In
+    func handleAppleSignInResult(_ result: Result<ASAuthorization, Error>) async {
+        isLoading = true
+        errorMessage = nil
+        
+        // Generate nonce if not already set (for SignInWithAppleButton usage)
+        if currentNonce == nil {
+            let nonce = randomNonceString()
+            currentNonce = nonce
+        }
+        
+        switch result {
+        case .success(let authorization):
+            await processAppleSignInResult(authorization)
+        case .failure(let error):
+            await MainActor.run {
+                // Handle specific Apple Sign In errors
+                if let authError = error as? ASAuthorizationError {
+                    switch authError.code {
+                    case .canceled:
+                        errorMessage = "Sign in was canceled"
+                    case .failed:
+                        errorMessage = "Sign in failed. Please try again."
+                    case .invalidResponse:
+                        errorMessage = "Invalid response from Apple. Please try again."
+                    case .notHandled:
+                        errorMessage = "Sign in not handled. Please try again."
+                    case .unknown:
+                        errorMessage = "Unknown error occurred. Please try again."
+                    @unknown default:
+                        errorMessage = "Sign in failed. Please try again."
+                    }
+                } else {
+                    errorMessage = ErrorMapper.userFriendlyMessage(for: error)
+                }
+                isLoading = false
+            }
+            AppLogger.logError(error, context: "Apple Sign In", logger: .auth)
+        }
+    }
+    
     func signInWithApple() async {
         isLoading = true
         errorMessage = nil
@@ -35,7 +77,7 @@ final class OAuthService: ObservableObject {
         
         do {
             let result = try await performAppleSignIn(request: request)
-            await handleAppleSignInResult(result)
+            await processAppleSignInResult(result)
         } catch {
             await MainActor.run {
                 errorMessage = ErrorMapper.userFriendlyMessage(for: error)
@@ -48,12 +90,17 @@ final class OAuthService: ObservableObject {
     private func performAppleSignIn(request: ASAuthorizationAppleIDRequest) async throws -> ASAuthorization {
         return try await withCheckedThrowingContinuation { continuation in
             let controller = ASAuthorizationController(authorizationRequests: [request])
-            controller.delegate = AppleSignInDelegate(continuation: continuation)
+            let delegate = AppleSignInDelegate(continuation: continuation) {
+                // Clear retained delegate after callback completes
+                self.appleSignInDelegate = nil
+            }
+            self.appleSignInDelegate = delegate
+            controller.delegate = delegate
             controller.performRequests()
         }
     }
     
-    private func handleAppleSignInResult(_ result: ASAuthorization) async {
+    private func processAppleSignInResult(_ result: ASAuthorization) async {
         guard let appleIDCredential = result.credential as? ASAuthorizationAppleIDCredential else {
             await MainActor.run {
                 errorMessage = "Invalid Apple credential"
@@ -236,17 +283,21 @@ final class OAuthService: ObservableObject {
 // MARK: - Apple Sign In Delegate
 private class AppleSignInDelegate: NSObject, ASAuthorizationControllerDelegate {
     private let continuation: CheckedContinuation<ASAuthorization, Error>
+    private let onFinish: () -> Void
     
-    init(continuation: CheckedContinuation<ASAuthorization, Error>) {
+    init(continuation: CheckedContinuation<ASAuthorization, Error>, onFinish: @escaping () -> Void) {
         self.continuation = continuation
+        self.onFinish = onFinish
     }
     
     func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
         continuation.resume(returning: authorization)
+        onFinish()
     }
     
     func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
         continuation.resume(throwing: error)
+        onFinish()
     }
 }
 
@@ -280,3 +331,4 @@ private func randomNonceString(length: Int = 32) -> String {
     }
     return result
 }
+

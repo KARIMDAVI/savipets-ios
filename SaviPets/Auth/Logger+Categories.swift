@@ -10,4 +10,6 @@ extension Logger {
     static let network = Logger(subsystem: appSubsystem, category: "Network")
     static let ui = Logger(subsystem: appSubsystem, category: "UI")
     static let data = Logger(subsystem: appSubsystem, category: "Data")
+    static let timer = Logger(subsystem: appSubsystem, category: "Timer")
+    static let chat = Logger(subsystem: appSubsystem, category: "Chat")
 }

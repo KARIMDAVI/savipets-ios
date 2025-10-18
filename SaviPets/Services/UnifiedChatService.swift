@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import FirebaseFirestore
 import FirebaseAuth
 import Combine
@@ -20,12 +21,23 @@ final class UnifiedChatService: ObservableObject {
     private let notificationManager = SmartNotificationManager.shared
     private var currentUserRole: UserRole = .petOwner
     private var userNameCache: [String: String] = [:]
+    private var cancellables = Set<AnyCancellable>()
     
     // MARK: - Singleton
     static let shared = UnifiedChatService()
     
     private init() {
         setupListeners()
+    }
+    
+    deinit {
+        cleanup()
+    }
+    
+    /// Cleanup method for memory management
+    func cleanup() {
+        // ListenerManager handles its own cleanup in deinit
+        userNameCache.removeAll()
     }
     
     // MARK: - Setup
@@ -81,7 +93,7 @@ final class UnifiedChatService: ObservableObject {
         
         // Check if admin inquiry channel already exists
         // Use a more specific query to find existing conversations
-        print("🔍 UnifiedChatService: Looking for existing admin inquiry conversation for user: \(currentUserId)")
+        AppLogger.chat.info("Looking for existing admin inquiry conversation for user: \(currentUserId)")
         
         // First, try to find conversations where both users are participants
         // We'll query by the current user and then filter client-side for the admin
@@ -92,7 +104,7 @@ final class UnifiedChatService: ObservableObject {
             .order(by: "lastMessageAt", descending: true)
             .getDocuments()
         
-        print("🔍 UnifiedChatService: Found \(existingQuery.documents.count) potential conversations")
+        AppLogger.chat.info("Found \(existingQuery.documents.count) potential conversations")
         
         // Filter to find conversation that also contains adminId
         // Also check that it has exactly 2 participants (user + admin)
@@ -101,24 +113,28 @@ final class UnifiedChatService: ObservableObject {
             if let participants = data["participants"] as? [String] {
                 let containsAdmin = participants.contains(adminId)
                 let hasCorrectParticipantCount = participants.count == 2
-                print("🔍 UnifiedChatService: Conversation \(doc.documentID) participants: \(participants), contains admin: \(containsAdmin), correct count: \(hasCorrectParticipantCount)")
+                AppLogger.chat.debug("Conversation \(doc.documentID) participants: \(participants), contains admin: \(containsAdmin), correct count: \(hasCorrectParticipantCount)")
                 return containsAdmin && hasCorrectParticipantCount
             }
             return false
         }
         
         if let existingDoc = existingConversation {
-            print("🔍 UnifiedChatService: Found existing conversation: \(existingDoc.documentID)")
+            AppLogger.chat.info("Found existing conversation: \(existingDoc.documentID)")
+            
+            // Attach message listener for the existing conversation
+            listenToMessages(conversationId: existingDoc.documentID)
+            
             return existingDoc.documentID
         }
         
-        print("🔍 UnifiedChatService: No existing conversation found, creating new one")
+        AppLogger.chat.info("No existing conversation found, creating new one")
         
         // Create new admin inquiry channel
         let conversationRef = db.collection("conversations").document()
         let userRole = getCurrentUserRole()
-        print("🔍 UnifiedChatService: Creating NEW conversation \(conversationRef.documentID) with user role: \(userRole.rawValue)")
-        print("🔍 UnifiedChatService: Participants: [\(currentUserId), \(adminId)]")
+        AppLogger.chat.info("Creating NEW conversation \(conversationRef.documentID) with user role: \(userRole.rawValue)")
+        AppLogger.chat.info("Participants: [\(currentUserId), \(adminId)]")
         
         // Check for and clean up any duplicate conversations before creating new one
         try await cleanupDuplicateConversations(for: currentUserId, adminId: adminId)
@@ -141,6 +157,10 @@ final class UnifiedChatService: ObservableObject {
         ]
         
         try await conversationRef.setData(conversationData)
+        
+        // Attach message listener for the new conversation
+        listenToMessages(conversationId: conversationRef.documentID)
+        
         return conversationRef.documentID
     }
     
@@ -182,6 +202,9 @@ final class UnifiedChatService: ObservableObject {
         ]
         
         try await conversationRef.setData(conversationData)
+        
+        // Attach message listener for the new conversation
+        listenToMessages(conversationId: conversationRef.documentID)
         
         // Update inquiry
         try await db.collection("inquiries").document(inquiryId).updateData([
@@ -269,7 +292,12 @@ final class UnifiedChatService: ObservableObject {
     // MARK: - Listener Management
     
     func listenToMessages(conversationId: String) {
-        _ = listenerManager.attachMessagesListener(for: conversationId)
+        AppLogger.chat.info("Attaching message listener for conversation: \(conversationId)")
+        listenerManager.attachMessagesListener(for: conversationId)
+            .sink { messages in
+                AppLogger.chat.debug("Received \(messages.count) messages for conversation \(conversationId)")
+            }
+            .store(in: &cancellables)
     }
     
     func listenToMyConversations() {
@@ -309,13 +337,13 @@ final class UnifiedChatService: ObservableObject {
     
     /// Set the current user's role (called from AppState)
     func setCurrentUserRole(_ role: UserRole) {
-        print("🟣 UnifiedChatService: Setting currentUserRole to: \(role.rawValue)")
+        AppLogger.chat.info("Setting currentUserRole to: \(role.rawValue)")
         currentUserRole = role
     }
     
     private func getCurrentUserRole() -> UserRole {
-        print("UnifiedChatService: getCurrentUserRole returning: \(currentUserRole)")
-        return currentUserRole
+        AppLogger.chat.debug("getCurrentUserRole returning: \(self.currentUserRole.rawValue)")
+        return self.currentUserRole
     }
     
     // MARK: - Legacy Compatibility Methods
@@ -354,7 +382,7 @@ extension UnifiedChatService {
     
     /// Migrate existing pendingMessages collection to message-level status
     func migratePendingMessages() async throws {
-        print("UnifiedChatService: Starting migration of pendingMessages collection")
+        AppLogger.data.info("Starting migration of pendingMessages collection")
         
         // Get all pending messages from the old collection
         let pendingMessagesSnapshot = try await db.collection("pendingMessages")
@@ -399,7 +427,7 @@ extension UnifiedChatService {
             try await document.reference.delete()
         }
         
-        print("UnifiedChatService: Migration completed successfully")
+        AppLogger.data.info("Migration completed successfully")
     }
     
     private func createOrGetSitterClientConversation(senderId: String, recipientName: String) async throws -> String {
@@ -439,7 +467,7 @@ extension UnifiedChatService {
     
     /// Public method to clean up all duplicate conversations in the system
     func cleanupAllDuplicateConversations() async throws {
-        print("🧹 UnifiedChatService: Starting cleanup of all duplicate conversations")
+        AppLogger.chat.info("Starting cleanup of all duplicate conversations")
         
         let allConversations = try await db.collection("conversations")
             .whereField("type", isEqualTo: ConversationType.adminInquiry.rawValue)
@@ -462,7 +490,7 @@ extension UnifiedChatService {
         // Clean up groups with duplicates
         for (key, conversations) in conversationGroups {
             if conversations.count > 1 {
-                print("🧹 UnifiedChatService: Found \(conversations.count) duplicate conversations for participants: \(key)")
+                AppLogger.chat.warning("Found \(conversations.count) duplicate conversations for participants: \(key)")
                 
                 // Sort by lastMessageAt to keep the most recent one
                 let sortedConversations = conversations.sorted { doc1, doc2 in
@@ -477,20 +505,20 @@ extension UnifiedChatService {
                 let conversationsToDelete = Array(sortedConversations.dropFirst())
                 
                 for doc in conversationsToDelete {
-                    print("🧹 UnifiedChatService: Deleting duplicate conversation: \(doc.documentID)")
+                    AppLogger.chat.info("Deleting duplicate conversation: \(doc.documentID)")
                     try await doc.reference.delete()
                 }
                 
-                print("🧹 UnifiedChatService: Cleaned up \(conversationsToDelete.count) duplicate conversations for \(key)")
+                AppLogger.chat.info("Cleaned up \(conversationsToDelete.count) duplicate conversations for \(key)")
             }
         }
         
-        print("🧹 UnifiedChatService: Cleanup completed")
+        AppLogger.chat.info("Cleanup completed")
     }
     
     /// Clean up duplicate conversations for the same user-admin pair
     private func cleanupDuplicateConversations(for userId: String, adminId: String) async throws {
-        print("🧹 UnifiedChatService: Cleaning up duplicate conversations for user: \(userId)")
+        AppLogger.chat.info("Cleaning up duplicate conversations for user: \(userId)")
         
         let duplicateQuery = try await db.collection("conversations")
             .whereField("participants", arrayContains: userId)
@@ -507,7 +535,7 @@ extension UnifiedChatService {
         }
         
         if duplicateConversations.count > 1 {
-            print("🧹 UnifiedChatService: Found \(duplicateConversations.count) duplicate conversations")
+            AppLogger.chat.warning("Found \(duplicateConversations.count) duplicate conversations")
             
             // Sort by lastMessageAt to keep the most recent one
             let sortedConversations = duplicateConversations.sorted { doc1, doc2 in
@@ -522,14 +550,43 @@ extension UnifiedChatService {
             let conversationsToDelete = Array(sortedConversations.dropFirst())
             
             for doc in conversationsToDelete {
-                print("🧹 UnifiedChatService: Deleting duplicate conversation: \(doc.documentID)")
+                AppLogger.chat.info("Deleting duplicate conversation: \(doc.documentID)")
                 try await doc.reference.delete()
             }
             
-            print("🧹 UnifiedChatService: Cleaned up \(conversationsToDelete.count) duplicate conversations")
+            AppLogger.chat.info("Cleaned up \(conversationsToDelete.count) duplicate conversations")
         }
+    }
+    
+    // MARK: - Delete Conversation
+    
+    /// Delete a specific conversation and all its messages
+    func deleteConversation(_ conversationId: String) async throws {
+        AppLogger.chat.info("Deleting conversation: \(conversationId)")
+        
+        let conversationRef = db.collection("conversations").document(conversationId)
+        
+        // First, delete all messages in the conversation
+        let messagesQuery = try await conversationRef.collection("messages").getDocuments()
+        
+        for messageDoc in messagesQuery.documents {
+            try await messageDoc.reference.delete()
+        }
+        
+        // Delete any typing indicators
+        let typingQuery = try await conversationRef.collection("typing").getDocuments()
+        
+        for typingDoc in typingQuery.documents {
+            try await typingDoc.reference.delete()
+        }
+        
+        // Finally, delete the conversation itself
+        try await conversationRef.delete()
+        
+        AppLogger.chat.info("Successfully deleted conversation: \(conversationId)")
     }
 }
 
 // MARK: - Error Extensions
+
 

@@ -1,6 +1,7 @@
 import SwiftUI
-import UIKit
 import FirebaseCore
+import AuthenticationServices
+import GoogleSignIn
 
 struct SignInView: View {
 	@EnvironmentObject var appState: AppState
@@ -147,7 +148,7 @@ struct SignInView: View {
                 },
                 onCompletion: { result in
                     Task {
-                        await oauthService.signInWithApple()
+                        await oauthService.handleAppleSignInResult(result)
                     }
                 }
             )

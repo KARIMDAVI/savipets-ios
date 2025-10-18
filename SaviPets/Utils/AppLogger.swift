@@ -8,6 +8,10 @@ enum AppLogger {
     static let network = Logger(subsystem: subsystem, category: "Network")
     static let ui = Logger(subsystem: subsystem, category: "UI")
     static let data = Logger(subsystem: subsystem, category: "Data")
+    static let chat = Logger(subsystem: subsystem, category: "Chat")
+    static let location = Logger(subsystem: subsystem, category: "Location")
+    static let timer = Logger(subsystem: subsystem, category: "Timer")
+    static let notification = Logger(subsystem: subsystem, category: "Notification")
     
     static func logError(_ error: Error, context: String, logger: Logger = .auth) {
         logger.error("[\(context)] \(error.localizedDescription)")

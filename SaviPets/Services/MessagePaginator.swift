@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import FirebaseFirestore
 import Combine
 
@@ -41,7 +42,7 @@ final class MessagePaginator: ObservableObject {
         } catch {
             await MainActor.run {
                 self.isLoading = false
-                print("MessagePaginator: Error loading initial messages: \(error)")
+                AppLogger.chat.info("Error loading initial messages: \(error)")
             }
         }
     }
@@ -66,7 +67,7 @@ final class MessagePaginator: ObservableObject {
         } catch {
             await MainActor.run {
                 self.isLoadingMore = false
-                print("MessagePaginator: Error loading more messages: \(error)")
+                AppLogger.chat.info("Error loading more messages: \(error)")
             }
         }
     }
@@ -102,7 +103,7 @@ final class MessagePaginator: ObservableObject {
         } catch {
             await MainActor.run {
                 self.isRefreshing = false
-                print("MessagePaginator: Error refreshing messages: \(error)")
+                AppLogger.chat.info("Error refreshing messages: \(error)")
             }
         }
     }
@@ -250,10 +251,10 @@ extension MessagePaginator {
                 if snapshot.documents.first != nil {
                     // Cache the latest message for quick access
                     // This could be stored in a cache or UserDefaults
-                    print("MessagePaginator: Preloaded latest message for conversation \(conversationId)")
+                    AppLogger.chat.info("Preloaded latest message for conversation \(conversationId)")
                 }
             } catch {
-                print("MessagePaginator: Error preloading messages for conversation \(conversationId): \(error)")
+                AppLogger.chat.info("Error preloading messages for conversation \(conversationId): \(error)")
             }
         }
     }
@@ -265,7 +266,7 @@ extension MessagePaginator {
         if messages.count > maxMessages {
             let messagesToKeep = Array(messages.suffix(maxMessages))
             messages = messagesToKeep
-            print("MessagePaginator: Optimized memory usage, kept \(maxMessages) most recent messages")
+            AppLogger.chat.info("Optimized memory usage, kept \(maxMessages) most recent messages")
         }
     }
     

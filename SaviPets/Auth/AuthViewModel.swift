@@ -1,5 +1,5 @@
 import Foundation
-import SwiftUI
+import OSLog
 import Combine
 import FirebaseAuth
 
@@ -76,6 +76,11 @@ final class AuthViewModel: ObservableObject {
             appState.role = role
             appState.displayName = extractDisplayName(from: email)
             AppLogger.logEvent("User signed in", parameters: ["role": role.rawValue])
+            
+            // Track analytics
+            if let uid = Auth.auth().currentUser?.uid {
+                AnalyticsManager.trackUserSignIn(userId: uid, role: role, method: "email")
+            }
         } catch {
             errorMessage = ErrorMapper.userFriendlyMessage(for: error)
             AppLogger.logError(error, context: "Sign In", logger: .auth)

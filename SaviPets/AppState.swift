@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SwiftUI
 import Combine
 import FirebaseAuth
@@ -44,12 +45,15 @@ final class AppState: ObservableObject {
                     let r = try? await self.authService.getUserRole(uid: uid)
                     await MainActor.run { 
                         self.role = r
-                        print("🟢 AppState: Setting user role to: \(r?.rawValue ?? "nil")")
+                        AppLogger.auth.info("Setting user role to: \(r?.rawValue ?? "nil")")
                         // Also set the role in the chat service
                         if let role = r {
                             self.chatService.setCurrentUserRole(role)
-                            print("🟢 AppState: Called chatService.setCurrentUserRole(\(role.rawValue))")
+                            AppLogger.auth.info("Called chatService.setCurrentUserRole(\(role.rawValue))")
                         }
+                        
+                        // Restart visits listener after authentication
+                        VisitsListenerManager.shared.restartAfterAuth()
                     }
                 }
             }

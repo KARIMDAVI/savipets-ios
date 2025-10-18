@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Combine
 import FirebaseFirestore
 
@@ -14,35 +15,82 @@ struct SitterProfile: Identifiable {
     let profileImage: String?
 }
 
+@MainActor
 final class SitterDataService: ObservableObject {
     @Published var availableSitters: [SitterProfile] = []
-    private let db = FirebaseFirestore.Firestore.firestore()
+    @Published var isLoading: Bool = false
+    @Published var error: Error?
+    
+    private let db = Firestore.firestore()
+    private var listener: ListenerRegistration?
 
     func listenToActiveSitters() {
+        isLoading = true
+        error = nil
+        
         // Source of truth: users collection with role == "petSitter"
-        db.collection("users")
+        listener = db.collection("users")
             .whereField("role", isEqualTo: SPDesignSystem.Roles.petSitter)
-            .addSnapshotListener { [weak self] snapshot, _ in
-                guard let documents = snapshot?.documents else { return }
-                self?.availableSitters = documents.map { doc in
-                    let data = doc.data()
-                    let name = (data["displayName"] as? String)
-                        ?? (data["name"] as? String)
-                        ?? (data["email"] as? String)?.components(separatedBy: "@").first?.replacingOccurrences(of: ".", with: " ").replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ").capitalized
-                        ?? "Sitter"
-                    return SitterProfile(
-                        id: doc.documentID,
-                        name: name,
-                        email: data["email"] as? String ?? "",
-                        phone: data["phone"] as? String,
-                        specialties: [],
-                        rating: 0.0,
-                        totalVisits: 0,
-                        isActive: true,
-                        profileImage: data["photoURL"] as? String
-                    )
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard let self = self else { return }
+                
+                Task { @MainActor in
+                    self.isLoading = false
+                    
+                    if let error = error {
+                        self.error = error
+                        AppLogger.data.error("Error fetching sitters: \(error.localizedDescription)")
+                        return
+                    }
+                    
+                    guard let documents = snapshot?.documents else { return }
+                    
+                    self.availableSitters = documents.map { doc in
+                        let data = doc.data()
+                        return SitterProfile(
+                            id: doc.documentID,
+                            name: self.extractName(from: data),
+                            email: data["email"] as? String ?? "",
+                            phone: data["phone"] as? String,
+                            specialties: data["specialties"] as? [String] ?? [],
+                            rating: data["rating"] as? Double ?? 0.0,
+                            totalVisits: data["totalVisits"] as? Int ?? 0,
+                            isActive: data["isActive"] as? Bool ?? true,
+                            profileImage: data["photoURL"] as? String
+                        )
+                    }
                 }
             }
+    }
+    
+    func stopListening() {
+        listener?.remove()
+        listener = nil
+    }
+    
+    private func extractName(from data: [String: Any]) -> String {
+        if let displayName = data["displayName"] as? String {
+            return displayName
+        }
+        
+        if let name = data["name"] as? String {
+            return name
+        }
+        
+        if let email = data["email"] as? String,
+           let username = email.components(separatedBy: "@").first {
+            return username
+                .replacingOccurrences(of: ".", with: " ")
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "-", with: " ")
+                .capitalized
+        }
+        
+        return "Sitter"
+    }
+    
+    deinit {
+        listener?.remove()
     }
 }
 

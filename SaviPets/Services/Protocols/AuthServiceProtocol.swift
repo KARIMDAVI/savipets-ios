@@ -29,6 +29,11 @@ protocol AuthServiceProtocol {
     ) async throws -> UserRole
     func signOut() throws
     func deleteAccount() async throws
+    func deleteAccountWithReauth(password: String) async throws
+    func scheduleAccountDeletion(password: String?, sendConfirmationEmail: Bool) async throws
+    func cancelAccountDeletion() async throws
+    func reauthenticate(password: String) async throws
+    func getCurrentSignInProvider() -> SignInProvider
     func getUserRole(uid: String) async throws -> UserRole?
     func setUserRole(uid: String, role: UserRole, email: String, displayName: String?) async throws
     func bootstrapAfterOAuth(defaultRole: UserRole, displayName: String?) async throws -> UserRole

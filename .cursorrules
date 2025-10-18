@@ -1,0 +1,88 @@
+# SaviPets Project Standards
+
+## Swift & SwiftUI Style
+- Use Swift 5.9+ features (async/await, actors for concurrency)
+- SwiftUI views: extract subviews when body exceeds 15 lines
+- Prefer @StateObject for view models, @ObservedObject for passed objects
+- Use #Preview macros for SwiftUI previews
+- Avoid force unwrapping (!), use guard let or if let
+- Use trailing closure syntax when last parameter is a closure
+
+## Architecture & Patterns
+- MVVM: Views → ViewModels → Services → Firebase
+- Services MUST conform to protocols (e.g., AuthServiceProtocol)
+- Use dependency injection via @EnvironmentObject or initializers
+- ViewModels handle business logic, Views only display state
+- Keep AppState as single source of truth for global state
+
+## Firebase Integration
+- Auth: Always use FirebaseAuthService, never Auth.auth() directly in views
+- Firestore: Use type-safe models with Codable
+- Error handling: Map Firebase errors through ErrorMapper
+- Logging: Use AppLogger with appropriate categories (auth, data, ui)
+- Never commit GoogleService-Info.plist changes with real keys
+
+## Services Layer
+- ResilientChatService for messaging with retry logic
+- UnifiedChatService for chat coordination
+- Use MessagePaginator for chat history loading
+- LocationService for geolocation features
+- NotificationService for push notifications
+
+## Naming Conventions
+- ViewModels: [Feature]ViewModel (e.g., AuthViewModel)
+- Services: [Purpose]Service (e.g., ChatService)
+- Views: [Feature]View (e.g., SignInView)
+- Models: Clear, descriptive names (Pet, Booking, Message)
+- Booleans: isLoading, hasError, canSubmit (not loading, error, submit)
+
+## Error Handling
+- Use Result<Success, Error> for async operations
+- Display user-friendly messages via ErrorMapper
+- Log technical details with AppLogger
+- Show loading states during async operations
+- Never silently fail—always inform the user
+
+## Testing
+- Write tests in SaviPetsTests/ directory
+- Use MockServices (MockAuthService) for unit tests
+- Test ViewModels independently of Views
+- Test edge cases: empty states, errors, slow networks
+- Minimum 70% code coverage for business logic
+- Always run build before executing
+
+## File Organization
+- Auth/ - authentication views and logic
+- Dashboards/ - role-based dashboards (Owner, Sitter, Admin)
+- Services/ - business logic and Firebase integration
+- Models/ - data models
+- Utils/ - helpers, constants, validation
+- Views/ - reusable UI components
+
+## Files AI Should NOT Modify
+- GoogleService-Info.plist
+- SaviPets.entitlements
+- Info.plist
+- .xcodeproj/project.pbxproj (unless adding new files)
+
+## Code Quality
+- No commented-out code in commits
+- Remove debug print() statements before committing
+- Use TODO: and FIXME: with clear descriptions
+- Max function length: 30 lines (extract helper functions)
+- Max file length: 300 lines (split into extensions)
+
+## Security
+- Never log sensitive data (passwords, tokens, PII)
+- Validate all user inputs with ValidationHelpers
+- Use Firebase Security Rules for data access control
+- Keep entitlements minimal
+
+## Git Workflow
+- Commit messages: "<type>: <description>" (feat:, fix:, refactor:)
+- Test before committing
+- No direct commits to main for major features
+
+
+
+Always follow the latest Swift and SwiftUI best practices used by top Apple developers. Write production-level, organized, and readable code using modern Swift conventions (MVVM, dependency injection, and async/await). Never generate boilerplate or redundant logic.

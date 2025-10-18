@@ -3,6 +3,7 @@ import FirebaseFirestore
 import FirebaseAuth
 import FirebaseStorage
 import UIKit
+import OSLog
 
 /// Owner-side pet data service: manages pets under artifacts/{appId}/users/{userId}/pets
 final class PetDataService {
@@ -30,17 +31,21 @@ final class PetDataService {
     // MARK: - Core Pet Document Structure
     struct Pet: Identifiable, Codable {
         var id: String?
-        let name: String
-        let species: String            // cat, dog, bird, critter
-        let breed: String?
-        let color: String?
-        let sex: String?               // Male or Female
-        let vaccinated: Bool?
-        let birthdate: Date
-        let photoURL: String?
-        let eventNote: String?         // Event note
-        let privateNote: String?       // Private note
-        let vetInfo: String?           // For Emergency
+        var name: String
+        var species: String            // cat, dog, bird, critter
+        var breed: String?
+        var color: String?
+        var sex: String?               // Male or Female
+        var vaccinated: Bool?
+        var birthdate: Date
+        var photoURL: String?
+        var eventNote: String?         // Event note
+        var privateNote: String?       // Private note
+        var vetInfo: String?           // For Emergency
+        var nickname: String?          // Pet nickname
+        var weight: String?            // Pet weight
+        var createdAt: Date?           // Creation timestamp
+        var updatedAt: Date?           // Last update timestamp
     }
 
     // MARK: - User Profile Models
@@ -113,6 +118,9 @@ final class PetDataService {
                 }
             }
         }
+        
+        // Denormalize: Update pet names in user document
+        await syncPetNamesToUserDocument(userId: uid)
     }
 
     // MARK: - List Pets (helper)
@@ -150,9 +158,54 @@ final class PetDataService {
                     photoURL: data["photoURL"] as? String,
                     eventNote: data["eventNote"] as? String,
                     privateNote: data["privateNote"] as? String,
-                    vetInfo: data["vetInfo"] as? String
+                    vetInfo: data["vetInfo"] as? String,
+                    nickname: data["nickname"] as? String,
+                    weight: data["weight"] as? String,
+                    createdAt: (data["createdAt"] as? Timestamp)?.dateValue(),
+                    updatedAt: (data["updatedAt"] as? Timestamp)?.dateValue()
                 )
             }
+        }
+    }
+
+    // MARK: - Get Single Pet
+    func getPet(petId: String) async throws -> Pet? {
+        let uid = try currentUserId()
+        return try await NetworkRetryHelper.retry {
+            let doc = try await petsCollectionRef(for: uid).document(petId).getDocument()
+            guard let data = doc.data(),
+                  let name = data["name"] as? String,
+                  let species = data["species"] as? String else {
+                return nil
+            }
+
+            let birthdate: Date
+            if let ts = data["birthdate"] as? Timestamp {
+                birthdate = ts.dateValue()
+            } else if let date = data["birthdate"] as? Date {
+                birthdate = date
+            } else {
+                return nil
+            }
+
+            return Pet(
+                id: doc.documentID,
+                name: name,
+                species: species,
+                breed: data["breed"] as? String,
+                color: data["color"] as? String,
+                sex: data["sex"] as? String,
+                vaccinated: data["vaccinated"] as? Bool,
+                birthdate: birthdate,
+                photoURL: data["photoURL"] as? String,
+                eventNote: data["eventNote"] as? String,
+                privateNote: data["privateNote"] as? String,
+                vetInfo: data["vetInfo"] as? String,
+                nickname: data["nickname"] as? String,
+                weight: data["weight"] as? String,
+                createdAt: (data["createdAt"] as? Timestamp)?.dateValue(),
+                updatedAt: (data["updatedAt"] as? Timestamp)?.dateValue()
+            )
         }
     }
 
@@ -247,6 +300,11 @@ final class PetDataService {
             let doc = petsCollectionRef(for: uid).document(petId)
             try await doc.setData(fields, merge: true)
         }
+        
+        // Denormalize: Update pet names in user document if name changed
+        if fields["name"] != nil {
+            await syncPetNamesToUserDocument(userId: uid)
+        }
     }
 
     // MARK: - Delete Pet
@@ -255,13 +313,41 @@ final class PetDataService {
         try await NetworkRetryHelper.retry {
             try await petsCollectionRef(for: uid).document(petId).delete()
         }
+        
+        // Denormalize: Update pet names in user document after deletion
+        await syncPetNamesToUserDocument(userId: uid)
+        
         // Broadcast change so all views refresh (OwnerPetsView & OwnerDashboardView listen to petsDidChange)
         await MainActor.run {
             NotificationCenter.default.post(name: .petsDidChange, object: nil)
         }
     }
 
+    // MARK: - Denormalization Helper
+    
+    /// Syncs pet names to the user document for efficient admin display
+    /// This eliminates the need for N queries when loading the admin clients view
+    private func syncPetNamesToUserDocument(userId: String) async {
+        do {
+            // Fetch all pet names for this user
+            let snap = try await petsCollectionRef(for: userId).getDocuments()
+            let petNames = snap.documents.compactMap { $0.data()["name"] as? String }
+            
+            // Update user document with denormalized pet names array
+            try await db.collection("users").document(userId).setData([
+                "petNames": petNames,
+                "petCount": petNames.count,
+                "petsUpdatedAt": FieldValue.serverTimestamp()
+            ], merge: true)
+            
+            AppLogger.data.debug("✅ Synced \(petNames.count) pet names to user \(userId.prefix(8))")
+        } catch {
+            AppLogger.data.error("Failed to sync pet names for user \(userId.prefix(8)): \(error.localizedDescription)")
+        }
+    }
+    
     // MARK: - Admin/Service helpers (cross-user access)
+    
     /// Fetches photo URLs for the given user's pets matching any of the provided names.
     /// Intended for admin/service flows where the current auth user is not the pet owner.
     func fetchPetPhotoURLs(forUserId userId: String, matchingNames names: [String]) async throws -> [String] {

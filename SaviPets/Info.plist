@@ -1,16 +1,11 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="2.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
+<plist version="2.0">
 <dict>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>We use your location during active walks to show progress to the pet owner.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>We use your location during active walks, including in the background, so owners can follow the walk.</string>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>location</string>
-		<string>remote-notification</string>
-	</array>
+    
+    <key>NSCalendarsUsageDescription</key>
+    <string>SaviPets uses your calendar access to help schedule pet visits and manage bookings smoothly.</string>
+    
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -18,10 +13,25 @@
 			<string>com.saviesa.SaviPets</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.googleusercontent.apps.367657554735-2bvdjbbf80fptrdqnvfq0hrrm2dof4lt</string>
+				<string>com.googleusercontent.apps.367657554735-v26ci7vp68kl5qu2qko21h5vshfmid7b</string>
 			</array>
 		</dict>
 	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+		<string>remote-notification</string>
+	</array>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>SaviPets needs location access to track pet sitters during visits and ensure pet safety. This allows clients to see when sitters arrive and leave.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>SaviPets requires "Always Allow" location access for pet sitters to track visits even when the app is in the background. This ensures continuous monitoring during pet care sessions.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>SaviPets requires "Always Allow" location access for pet sitters to track visits even when the app is in the background. This ensures continuous monitoring during pet care sessions.</string>
 </dict>
 </plist>
- 

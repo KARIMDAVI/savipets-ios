@@ -1,26 +1,33 @@
 import SwiftUI
-import FirebaseCore
 import AuthenticationServices
-import GoogleSignIn
-import UIKit
+import FirebaseCore
 
 struct SignUpView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var oauthService: OAuthService
 
     @State private var firstName: String = ""
     @State private var lastName: String = ""
     @State private var email: String = ""
     @State private var password: String = ""
+    @State private var address: String = ""
     @State private var selectedRole: UserRole = .petOwner
     @State private var acceptedTerms: Bool = false
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
     
     // Additional fields for sitters
-    @State private var address: String = ""
+    @State private var invCode: String = ""
     @State private var dateOfBirth: Date = Calendar.current.date(byAdding: .year, value: -25, to: Date()) ?? Date()
+    
+    init() {
+        // Initialize with dependencies - will be properly injected in real usage
+        let authService: AuthServiceProtocol = FirebaseAuthService()
+        let appState = AppState()
+        self._oauthService = StateObject(wrappedValue: OAuthService(authService: authService, appState: appState))
+    }
 
     var body: some View {
         ZStack {
@@ -45,12 +52,13 @@ struct SignUpView: View {
                         FloatingTextField(title: "Last Name", text: $lastName)
                         FloatingTextField(title: "Email", text: $email, kind: .email)
                         FloatingTextField(title: "Password", text: $password, kind: .secure)
+                        FloatingTextField(title: "Address", text: $address)
 
                         rolePicker
                         
                         // Additional fields for sitters
                         if selectedRole == .petSitter {
-                            FloatingTextField(title: "Address", text: $address)
+                            FloatingTextField(title: "Invitiation Code", text: $invCode)
                             
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Date of Birth").font(.caption).foregroundColor(.secondary)
@@ -82,11 +90,13 @@ struct SignUpView: View {
                         // Revert toggle to bright gold in light mode only
                         .toggleStyle(SwitchToggleStyle(tint: colorScheme == .light ? SPDesignSystem.Colors.primary : SPDesignSystem.Colors.primaryAdjusted(colorScheme)))
 
-                        if let errorMessage { Text(errorMessage).foregroundColor(SPDesignSystem.Colors.error) }
+                        if let errorMessage = errorMessage ?? oauthService.errorMessage { 
+                            Text(errorMessage).foregroundColor(SPDesignSystem.Colors.error) 
+                        }
 
-                        Button(action: { if !isLoading { createAccount() } }) {
+                        Button(action: { if !isLoading && !oauthService.isLoading { createAccount() } }) {
                             HStack(spacing: SPDesignSystem.Spacing.s) {
-                                if isLoading {
+                                if isLoading || oauthService.isLoading {
                                     ProgressView().progressViewStyle(CircularProgressViewStyle(tint: SPDesignSystem.Colors.dark))
                                 }
                                 Image(systemName: "person.badge.plus.fill")
@@ -94,7 +104,7 @@ struct SignUpView: View {
                             }
                             .frame(maxWidth: .infinity)
                         }
-                        .disabled(isLoading)
+                        .disabled(isLoading || oauthService.isLoading)
                         .buttonStyle(PrimaryButtonStyleBrightInLight())
 
                         // Third-party sign up buttons (Apple & Google)
@@ -125,7 +135,7 @@ struct SignUpView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Role").font(.caption).foregroundColor(.secondary)
             Picker("Select your role", selection: $selectedRole) {
-                Text("Pet Owner").tag(UserRole.petOwner)
+                Text("Pet Parent").tag(UserRole.petOwner)
                 Text("Pet Sitter").tag(UserRole.petSitter)
             }
             .pickerStyle(.segmented)
@@ -161,53 +171,22 @@ struct SignUpView: View {
                     request.requestedScopes = [.fullName, .email]
                 },
                 onCompletion: { result in
-                    switch result {
-                    case .success(let auth):
-                        if let credential = auth.credential as? ASAuthorizationAppleIDCredential {
-                            let given = credential.fullName?.givenName
-                            let family = credential.fullName?.familyName
-                            let full = [given, family].compactMap { $0 }.joined(separator: " ")
-                            if !full.trimmingCharacters(in: .whitespaces).isEmpty {
-                                appState.displayName = full
-                            } else if let email = credential.email {
-                                appState.displayName = email.components(separatedBy: "@").first?
-                                    .replacingOccurrences(of: ".", with: " ")
-                                    .replacingOccurrences(of: "_", with: " ")
-                                    .replacingOccurrences(of: "-", with: " ")
-                                    .capitalized
-                            }
-
-                            // After Apple sign-in, ensure role/profile exists using selectedRole as default
-                            Task {
-                                // Extract display name from Apple credential
-                                let displayName: String?
-                                if let given = credential.fullName?.givenName, let family = credential.fullName?.familyName {
-                                    let full = "\(given) \(family)".trimmingCharacters(in: .whitespaces)
-                                    displayName = full.isEmpty ? nil : full
-                                } else {
-                                    displayName = nil
-                                }
-
-                                let _ = try? await appState.authService.bootstrapAfterOAuth(defaultRole: selectedRole, displayName: displayName)
-                                await MainActor.run {
-                                    if appState.displayName == nil {
-                                        appState.displayName = displayName
-                                    }
-                                    appState.isAuthenticated = true
-                                    appState.role = selectedRole
-                                }
-                            }
-                        }
-                    case .failure(_):
-                        errorMessage = "Sign in failed"
+                    Task {
+                        await handleAppleSignUpResult(result)
                     }
                 }
             )
             .signInWithAppleButtonStyle(.black)
             .frame(height: 44)
             .cornerRadius(8)
+            .accessibilityLabel("Sign up with Apple")
+            .accessibilityHint("Double tap to create an account using your Apple ID")
 
-            Button(action: { googleSignUp() }) {
+            Button(action: { 
+                Task {
+                    await handleGoogleSignUp()
+                }
+            }) {
                 HStack {
                     Spacer()
                     HStack(spacing: 8) {
@@ -223,6 +202,8 @@ struct SignUpView: View {
                 .foregroundColor(.black)
             }
             .glass()
+            .accessibilityLabel("Sign up with Google")
+            .accessibilityHint("Double tap to create an account using your Google account")
         }
     }
 
@@ -234,12 +215,16 @@ struct SignUpView: View {
         
         // Additional validation for sitters
         if selectedRole == .petSitter {
-            guard !address.isEmpty else {
-                errorMessage = "Please provide your address"
+            guard !invCode.isEmpty else {
+                errorMessage = "Please provide your Invitation Code"
                 return
             }
             guard Calendar.current.dateComponents([.year], from: dateOfBirth, to: Date()).year ?? 0 >= 18 else {
                 errorMessage = "You must be at least 18 years old to be a pet sitter"
+                return
+            }
+            guard !address.isEmpty else {
+                errorMessage = "Address is required for pet sitters"
                 return
             }
         }
@@ -255,7 +240,7 @@ struct SignUpView: View {
                     role: selectedRole,
                     firstName: firstName,
                     lastName: lastName,
-                    address: selectedRole == .petSitter ? address : nil,
+                    address: selectedRole == .petSitter ? invCode : nil,
                     dateOfBirth: selectedRole == .petSitter ? dateOfBirth : nil
                 )
                 await MainActor.run {
@@ -282,43 +267,33 @@ struct SignUpView: View {
         }
     }
 
-    private func googleSignUp() {
-        // Ensure GoogleSignIn has configuration
-        if GIDSignIn.sharedInstance.configuration == nil {
-            if let clientID = FirebaseApp.app()?.options.clientID {
-                GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID)
+    // MARK: - OAuth Handlers
+    
+    private func handleAppleSignUpResult(_ result: Result<ASAuthorization, Error>) async {
+        await oauthService.handleAppleSignInResult(result)
+        
+        // After successful OAuth, ensure role/profile exists using selectedRole as default
+        if oauthService.errorMessage == nil {
+            Task {
+                let _ = try? await appState.authService.bootstrapAfterOAuth(defaultRole: selectedRole, displayName: appState.displayName)
+                await MainActor.run {
+                    appState.role = selectedRole
+                    dismiss()
+                }
             }
         }
-        guard let rootVC = UIApplication.shared.connectedScenes
-            .compactMap({ ($0 as? UIWindowScene)?.keyWindow?.rootViewController }).first else { return }
-        GIDSignIn.sharedInstance.signIn(withPresenting: rootVC) { result, error in
-            if let error = error {
-                errorMessage = error.localizedDescription
-                return
-            }
-            
-            // Extract display name from Google profile
-            let displayName: String?
-            if let name = result?.user.profile?.name, !name.isEmpty {
-                displayName = name
-            } else {
-                displayName = nil
-            }
-            
-            // Ensure role/profile exists using selectedRole as default
+    }
+    
+    private func handleGoogleSignUp() async {
+        await oauthService.signInWithGoogle()
+        
+        // After successful OAuth, ensure role/profile exists using selectedRole as default
+        if oauthService.errorMessage == nil {
             Task {
-                let _ = try? await appState.authService.bootstrapAfterOAuth(defaultRole: selectedRole, displayName: displayName)
+                let _ = try? await appState.authService.bootstrapAfterOAuth(defaultRole: selectedRole, displayName: appState.displayName)
                 await MainActor.run {
-                    appState.displayName = displayName
-                    if appState.displayName == nil, let email = result?.user.profile?.email {
-                        appState.displayName = email.components(separatedBy: "@").first?
-                            .replacingOccurrences(of: ".", with: " ")
-                            .replacingOccurrences(of: "_", with: " ")
-                            .replacingOccurrences(of: "-", with: " ")
-                            .capitalized
-                    }
-                    appState.isAuthenticated = true
                     appState.role = selectedRole
+                    dismiss()
                 }
             }
         }

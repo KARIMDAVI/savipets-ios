@@ -1,4 +1,5 @@
 import SwiftUI
+import OSLog
 import FirebaseAuth
 import Combine
 import FirebaseFirestore
@@ -35,7 +36,9 @@ struct ConversationChatView: View {
         if showingSearch && !searchQuery.isEmpty {
             return paginationViewModel.searchResults
         }
-        return paginationViewModel.paginator.messages
+        // Use real-time messages from listener for instant updates
+        let realtimeMessages = listenerManager.messages[conversationId] ?? []
+        return realtimeMessages.sorted { $0.timestamp < $1.timestamp }  // Oldest to newest
     }
     
     private var currentUserId: String? {
@@ -48,27 +51,61 @@ struct ConversationChatView: View {
     
     // MARK: - Body
     var body: some View {
-        VStack(spacing: 0) {
-            // Header with conversation info
-            conversationHeader
+        ZStack {
+            // Modern gradient background (like ChatView)
+            LinearGradient(
+                colors: [
+                    Color(.systemGray6),
+                    Color(.systemBackground)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
             
-            // Messages area with enhanced features
-            messagesArea
-            
-            // Typing indicator
-            if showTypingIndicator && !typingUsers.isEmpty {
-                typingIndicatorView
+            VStack(spacing: 0) {
+                // Messages area with enhanced features
+                messagesArea
+                    .ignoresSafeArea(.keyboard, edges: .bottom)
+                
+                // Typing indicator
+                if showTypingIndicator && !typingUsers.isEmpty {
+                    typingIndicatorView
+                }
             }
-            
-            // Message input with reactions
+        }
+        // ✅ Use safeAreaInset for keyboard-safe input bar
+        .safeAreaInset(edge: .bottom) {
             messageInputArea
         }
-        .navigationTitle(conversationTitle)
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 2) {
+                    Text(conversationTitle)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(.primary)
+                    
+                    if conversation != nil {  // Swift 6: unused value fix
+                        Text("Online")
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundColor(.green)
+                    }
+                }
+            }
+            
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button("Search") {
-                    showingSearch.toggle()
+                HStack(spacing: 16) {
+                    Button(action: { showingSearch.toggle() }) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 16, weight: .medium))
+                    }
+                    
+                    Image(systemName: "pawprint.fill")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(SPDesignSystem.Colors.chatYellow)
                 }
             }
         }
@@ -89,127 +126,52 @@ struct ConversationChatView: View {
         }
     }
     
-    // MARK: - Conversation Header
-    private var conversationHeader: some View {
-        HStack {
-            // Conversation info
-            VStack(alignment: .leading, spacing: 2) {
-                Text(conversationTitle)
-                    .font(.headline)
-                    .foregroundColor(.primary)
-                
-                if let conversation = conversation {
-                    Text("\(conversation.participants.count) participants")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            
-            Spacer()
-            
-            // Unread count badge
-            if let conversation = conversation,
-               let currentUserId = currentUserId,
-               conversation.unreadCount(for: currentUserId) > 0 {
-                Text("\(conversation.unreadCount(for: currentUserId))")
-                    .font(.caption2)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.red)
-                    .clipShape(Capsule())
-            }
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(Color(.systemGray6))
-    }
-    
     // MARK: - Messages Area
     private var messagesArea: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 8) {
-                    // Load more button
-                    if paginationViewModel.paginator.hasMoreMessages {
-                        loadMoreButton
-                    }
-                    
-                    // Messages
+                LazyVStack(spacing: 12) {
+                    // Messages (Using modern MessageBubble component)
                     ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                        MessageBubbleView(
+                        MessageBubble(
                             message: message,
-                            displayName: listenerManager.displayName(for: message.senderId),
-                            isCurrentUser: message.senderId == currentUserId,
-                            onReaction: { emoji in
-                                handleMessageReaction(message: message, emoji: emoji)
-                            },
-                            onLongPress: {
-                                selectedMessage = message
-                                showMessageReactions = message.id
-                            }
+                            isFromCurrentUser: message.senderId == currentUserId,
+                            senderName: message.senderId == currentUserId ? nil : listenerManager.displayName(for: message.senderId),
+                            showAvatar: shouldShowAvatar(at: index),
+                            showTimestamp: shouldShowTimestamp(at: index)
                         )
                         .id(message.id)
-                        .onAppear {
-                            // Load more messages when scrolling to top
-                            if paginationViewModel.paginator.shouldLoadMore(currentIndex: index) {
-                                Task {
-                                    await paginationViewModel.loadMoreMessages()
-                                }
-                            }
+                        .onLongPressGesture {
+                            selectedMessage = message
+                            showMessageReactions = message.id
                         }
                     }
                     
-                    // Scroll anchor
+                    // Scroll anchor at bottom
                     Color.clear
                         .frame(height: 1)
                         .id("bottom")
                 }
-                .padding()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
             }
             .onChange(of: messages.count) { _ in
                 // Auto-scroll to bottom when new messages arrive
-                if scrollToBottom {
-                    withAnimation(.easeInOut(duration: 0.3)) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    withAnimation(.easeOut(duration: 0.3)) {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
                 }
             }
-            .refreshable {
-                await paginationViewModel.refreshMessages()
-            }
-        }
-    }
-    
-    // MARK: - Load More Button
-    private var loadMoreButton: some View {
-        Button(action: {
-            guard !isLoadingMore else { return }
-            isLoadingMore = true
-            Task {
-                await paginationViewModel.loadMoreMessages()
-                await MainActor.run {
-                    isLoadingMore = false
+            .onAppear {
+                // Initial scroll to bottom
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
                 }
             }
-        }) {
-            HStack {
-                if isLoadingMore {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                } else {
-                    Image(systemName: "chevron.up")
-                }
-                Text(isLoadingMore ? "Loading..." : "Load More")
-                    .font(.caption)
-            }
-            .foregroundColor(.accentColor)
-            .padding(.vertical, 8)
-            .padding(.horizontal, 16)
-            .background(Color(.systemGray6))
-            .cornerRadius(20)
         }
-        .disabled(isLoadingMore)
     }
     
     // MARK: - Typing Indicator
@@ -252,40 +214,13 @@ struct ConversationChatView: View {
                 messageReactionsView(for: message)
             }
             
-            // Input field
-            HStack(alignment: .bottom, spacing: 12) {
-                // Text input
-                VStack(spacing: 0) {
-                    TextField("Type a message...", text: $messageText, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 20)
-                                .fill(Color(.systemGray6))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 20)
-                                        .stroke(Color(.systemGray4), lineWidth: 1)
-                                )
-                        )
-                        .lineLimit(1...6)
-                }
-                
-                // Send button
-                Button(action: sendMessage) {
-                    Image(systemName: "paperplane.fill")
-                        .foregroundColor(.white)
-                        .frame(width: 36, height: 36)
-                        .background(
-                            Circle()
-                                .fill(canSendMessage ? Color.accentColor : Color(.systemGray4))
-                        )
-                }
-                .disabled(!canSendMessage)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(Color(.systemBackground))
+            // ✨ NEW: Modern MessageInputBar component
+            MessageInputBar(
+                messageText: $messageText,
+                onSend: sendMessage,
+                onTyping: handleTypingIndicator,
+                showAttachButton: false
+            )
         }
     }
     
@@ -372,16 +307,47 @@ struct ConversationChatView: View {
     
     // MARK: - Methods
     private func setupConversation() {
-        Task {
-            await paginationViewModel.loadMessages(for: conversationId)
-        }
+        // Enable auto-scroll to bottom for new conversations
+        scrollToBottom = true
         
-        // Attach listeners
-        listenerManager.attachMessagesListener(for: conversationId)
+        // Attach listeners for real-time updates FIRST
+        // This ensures messages are loaded and maintained
+        _ = listenerManager.attachMessagesListener(for: conversationId)
         listenerManager.attachTypingIndicatorListener(for: conversationId)
+        
+        // Load historical messages after listener is attached with timeout handling
+        Task {
+            do {
+                // Set a timeout for message loading
+                try await withTimeout(seconds: 10) {
+                    await paginationViewModel.loadMessages(for: conversationId)
+                }
+            } catch {
+                AppLogger.chat.error("Failed to load messages for conversation \(conversationId): \(error.localizedDescription)")
+                // Continue with real-time messages even if historical loading fails
+            }
+        }
         
         // Mark conversation as read
         markConversationAsRead()
+    }
+    
+    // Helper function to add timeout to async operations
+    private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw NSError(domain: "TimeoutError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation timed out"])
+            }
+            
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
     }
     
     private func cleanupConversation() {
@@ -407,13 +373,17 @@ struct ConversationChatView: View {
                     text: textToSend
                 )
             } catch {
-                print("Error sending message: \(error)")
+                AppLogger.chat.error("Error sending message: \(error.localizedDescription)")
                 // Restore message text on error
                 await MainActor.run {
                     messageText = textToSend
                 }
             }
         }
+    }
+    
+    private func handleTypingIndicator() {
+        handleTypingStatus(messageText)
     }
     
     private func handleTypingStatus(_ text: String) {
@@ -494,124 +464,49 @@ struct ConversationChatView: View {
             "unreadCounts.\(currentUserId)": 0
         ])
     }
+    
+    private func shouldShowAvatar(at index: Int) -> Bool {
+        guard index < messages.count else { return true }
+        let message = messages[index]
+        
+        // Always show for first message
+        if index == 0 { return true }
+        
+        // Show if sender changed from previous message
+        if index > 0 && messages[index - 1].senderId != message.senderId {
+            return true
+        }
+        
+        // Show if time gap > 5 minutes from previous message
+        if index > 0 {
+            let timeDiff = message.timestamp.timeIntervalSince(messages[index - 1].timestamp)
+            if timeDiff > 300 { return true }
+        }
+        
+        return false
+    }
+    
+    private func shouldShowTimestamp(at index: Int) -> Bool {
+        guard index < messages.count else { return false }
+        
+        // Show for last message
+        if index == messages.count - 1 { return true }
+        
+        // Show if next message is from different sender
+        if index < messages.count - 1 && messages[index + 1].senderId != messages[index].senderId {
+            return true
+        }
+        
+        // Show if time gap > 5 minutes to next message
+        if index < messages.count - 1 {
+            let timeDiff = messages[index + 1].timestamp.timeIntervalSince(messages[index].timestamp)
+            if timeDiff > 300 { return true }
+        }
+        
+        return false
+    }
 }
 
-// MARK: - Message Bubble View
-struct MessageBubbleView: View {
-    let message: ChatMessage
-    let displayName: String
-    let isCurrentUser: Bool
-    let onReaction: (String) -> Void
-    let onLongPress: () -> Void
-    
-    var body: some View {
-        HStack {
-            if isCurrentUser {
-                Spacer()
-                VStack(alignment: .trailing, spacing: 4) {
-                    messageContent
-                    messageMetadata
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    if !isCurrentUser {
-                        Text(displayName)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    messageContent
-                    messageMetadata
-                }
-                Spacer()
-            }
-        }
-        .onLongPressGesture {
-            onLongPress()
-        }
-    }
-    
-    private var messageContent: some View {
-        VStack(alignment: isCurrentUser ? .trailing : .leading, spacing: 4) {
-            // Message text
-            Text(message.text)
-                .padding()
-                .background(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(isCurrentUser ? Color.accentColor : Color(.systemGray5))
-                )
-                .foregroundColor(isCurrentUser ? .white : .primary)
-            
-            // Message reactions
-            if !message.reactions.isEmpty {
-                messageReactions
-            }
-        }
-    }
-    
-    private var messageReactions: some View {
-        HStack(spacing: 4) {
-            ForEach(Array(message.reactions.keys.sorted()), id: \.self) { emoji in
-                Button(emoji) {
-                    onReaction(emoji)
-                }
-                .font(.caption)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color(.systemGray6))
-                .cornerRadius(8)
-                .overlay(
-                    Text("\(message.reactions[emoji]?.count ?? 0)")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 2)
-                        .background(Color(.systemBackground))
-                        .clipShape(Circle())
-                        .offset(x: 8, y: -8)
-                )
-            }
-        }
-    }
-    
-    private var messageMetadata: some View {
-        HStack(spacing: 4) {
-            // Delivery status
-            if isCurrentUser {
-                deliveryStatusIcon
-            }
-            
-            // Timestamp
-            Text(timeString)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-        }
-    }
-    
-    private var deliveryStatusIcon: some View {
-        Group {
-            switch message.deliveryStatus {
-            case .sending:
-                Image(systemName: "clock")
-                    .foregroundColor(.secondary)
-            case .delivered:
-                Image(systemName: "checkmark")
-                    .foregroundColor(.secondary)
-            case .read:
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.blue)
-            case .failed:
-                Image(systemName: "exclamationmark.triangle")
-                    .foregroundColor(.red)
-            }
-        }
-        .font(.caption2)
-    }
-    
-    private var timeString: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "h:mm a"
-        return formatter.string(from: message.timestamp)
-    }
-}
 
 // MARK: - Searchable Compatibility
 private extension View {

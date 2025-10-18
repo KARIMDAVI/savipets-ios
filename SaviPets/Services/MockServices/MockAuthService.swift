@@ -122,6 +122,69 @@ final class MockAuthService: AuthServiceProtocol {
         currentUser = nil
     }
     
+    func deleteAccountWithReauth(password: String) async throws {
+        // First re-authenticate
+        try await reauthenticate(password: password)
+        
+        // Then delete
+        try await deleteAccount()
+    }
+    
+    func reauthenticate(password: String) async throws {
+        if !shouldSucceed {
+            throw FirebaseAuthError.reauthenticationFailed
+        }
+        
+        guard currentUser != nil else {
+            throw FirebaseAuthError.userNotFound
+        }
+        
+        // Simulate network delay
+        try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
+        
+        // Mock validation: password must not be empty
+        if password.isEmpty {
+            throw FirebaseAuthError.reauthenticationFailed
+        }
+    }
+    
+    func scheduleAccountDeletion(password: String?, sendConfirmationEmail: Bool) async throws {
+        if !shouldSucceed {
+            throw mockError ?? NSError(domain: "MockAuth", code: 500, userInfo: [NSLocalizedDescriptionKey: "Mock schedule deletion failed"])
+        }
+        
+        guard currentUser != nil else {
+            throw FirebaseAuthError.userNotFound
+        }
+        
+        // Simulate network delay
+        try? await Task.sleep(nanoseconds: 300_000_000) // 0.3 seconds
+        
+        // In mock, just log the action
+        print("Mock: Account deletion scheduled")
+    }
+    
+    func cancelAccountDeletion() async throws {
+        if !shouldSucceed {
+            throw mockError ?? NSError(domain: "MockAuth", code: 500, userInfo: [NSLocalizedDescriptionKey: "Mock cancel deletion failed"])
+        }
+        
+        guard currentUser != nil else {
+            throw FirebaseAuthError.userNotFound
+        }
+        
+        // Simulate network delay
+        try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
+        
+        // In mock, just log the action
+        print("Mock: Account deletion canceled")
+    }
+    
+    func getCurrentSignInProvider() -> SignInProvider {
+        // Mock: always return email for simplicity
+        return .email
+    }
+    
     func getUserRole(uid: String) async throws -> UserRole? {
         // Simulate network delay
         try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds

@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import FirebaseFirestore
 import FirebaseAuth
 import Combine
@@ -19,6 +20,7 @@ final class ResilientChatService: ObservableObject {
     private let maxRetryDelay: TimeInterval = 30.0
     private let offlineQueue = "offline_messages"
     private let retryQueueKey = "retry_operations"
+    private var networkObserver: NSObjectProtocol?
     
     // MARK: - Singleton
     static let shared = ResilientChatService()
@@ -29,11 +31,17 @@ final class ResilientChatService: ObservableObject {
         startNetworkMonitoring()
     }
     
+    deinit {
+        if let observer = networkObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+    
     // MARK: - Network Monitoring
     
     private func startNetworkMonitoring() {
         // Monitor network connectivity
-        NotificationCenter.default.addObserver(
+        networkObserver = NotificationCenter.default.addObserver(
             forName: NSNotification.Name("NetworkStatusChanged"),
             object: nil,
             queue: .main
@@ -115,7 +123,7 @@ final class ResilientChatService: ObservableObject {
             .document(messageId)
         
         // Use transaction for atomic write
-        try await db.runTransaction { transaction, errorPointer in
+        _ = try await db.runTransaction { transaction, errorPointer in  // Swift 6: unused return value fix
             // Write message
             transaction.setData(messageData, forDocument: messageRef)
             
@@ -136,7 +144,7 @@ final class ResilientChatService: ObservableObject {
             "status": MessageStatus.sent.rawValue
         ])
         
-        print("ResilientChatService: Message sent successfully")
+        AppLogger.chat.info("Message sent successfully")
     }
     
     // MARK: - Smart Message Sending with Auto-Response
@@ -160,10 +168,10 @@ final class ResilientChatService: ObservableObject {
             throw ChatError.invalidConversationData
         }
         
-        print("ResilientChatService: sendMessageSmart - conversationId: \(conversationId)")
-        print("ResilientChatService: participants: \(participants)")
-        print("ResilientChatService: participantRoles: \(participantRoles)")
-        print("ResilientChatService: currentUserId: \(currentUserId)")
+        AppLogger.chat.info("sendMessageSmart - conversationId: \(conversationId)")
+        AppLogger.chat.info("participants: \(participants)")
+        AppLogger.chat.info("participantRoles: \(participantRoles)")
+        AppLogger.chat.info("currentUserId: \(currentUserId)")
         
         // Determine moderation type based on conversation type
         let moderationType: ModerationType
@@ -228,7 +236,7 @@ final class ResilientChatService: ObservableObject {
                         Date().timeIntervalSince(autoResponseHistory[currentUserId]!) > 86400 // 24 hours
         
         guard shouldSend else {
-            print("ResilientChatService: Auto-response already sent recently for user: \(currentUserId)")
+            AppLogger.chat.info("Auto-response already sent recently for user: \(currentUserId)")
             return
         }
         
@@ -247,7 +255,7 @@ final class ResilientChatService: ObservableObject {
             "isAutoResponse": true
         ]
         
-        try await db.runTransaction { transaction, errorPointer in
+        _ = try await db.runTransaction { transaction, errorPointer in  // Swift 6: unused return value fix
             // Add auto-response message
             let messageRef = conversationRef.collection("messages").document(messageId)
             transaction.setData(messageData, forDocument: messageRef)
@@ -267,7 +275,7 @@ final class ResilientChatService: ObservableObject {
             return nil
         }
         
-        print("ResilientChatService: Auto-response sent successfully")
+        AppLogger.chat.info("Auto-response sent successfully")
     }
     
     // MARK: - Message Approval System
@@ -302,7 +310,7 @@ final class ResilientChatService: ObservableObject {
             ])
         }
         
-        print("ResilientChatService: Message approved successfully")
+        AppLogger.chat.info("Message approved successfully")
     }
     
     func rejectMessage(messageId: String, conversationId: String, reason: String) async throws {
@@ -323,7 +331,7 @@ final class ResilientChatService: ObservableObject {
             "failureReason": reason
         ])
         
-        print("ResilientChatService: Message rejected successfully")
+        AppLogger.chat.info("Message rejected successfully")
     }
     
     // MARK: - Offline Support
@@ -346,7 +354,7 @@ final class ResilientChatService: ObservableObject {
         }
         
         saveOfflineMessages()
-        print("ResilientChatService: Message saved offline")
+        AppLogger.chat.info("Message saved offline")
     }
     
     private func processOfflineQueue() async {
@@ -451,7 +459,8 @@ final class ResilientChatService: ObservableObject {
     // MARK: - Error Classification
     
     private func isRetryableError(_ error: Error) -> Bool {
-        if let firestoreError = error as? NSError {
+        let firestoreError = error as NSError  // Swift 6: conditional cast always succeeds, removed 'if let'
+        if true {
             switch firestoreError.code {
             case 14: // UNAVAILABLE
                 return true

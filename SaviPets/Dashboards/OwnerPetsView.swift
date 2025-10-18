@@ -69,11 +69,26 @@ struct OwnerPetsView: View {
 struct PetGridCard: View {
     let name: String
     let photoURL: String?
+    let species: String
+    
+    init(name: String, photoURL: String?, species: String = "dog") {
+        self.name = name
+        self.photoURL = photoURL
+        self.species = species
+    }
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack {
+                // Background gradient for depth
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.black.opacity(0.05))
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.black.opacity(0.03), Color.black.opacity(0.08)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
                     .frame(height: 110)
 
                 if let s = photoURL, let url = URL(string: s) {
@@ -86,11 +101,7 @@ struct PetGridCard: View {
                                 .frame(height: 110)
                                 .clipped()
                         case .failure(_):
-                            Image(systemName: "pawprint.fill")
-                                .resizable()
-                                .scaledToFit()
-                                .foregroundColor(.gray.opacity(0.35))
-                                .padding(24)
+                            speciesIcon
                         case .empty:
                             ProgressView()
                         @unknown default:
@@ -99,11 +110,7 @@ struct PetGridCard: View {
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 } else {
-                    Image(systemName: "pawprint.fill")
-                        .resizable()
-                        .scaledToFit()
-                        .foregroundColor(.gray.opacity(0.35))
-                        .padding(24)
+                    speciesIcon
                 }
             }
             .frame(height: 110)
@@ -113,15 +120,94 @@ struct PetGridCard: View {
                 .font(.headline)
                 .lineLimit(1)
         }
-        .padding(10)
+        .padding(12)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.ultraThinMaterial)
+            ZStack {
+                // Glass morphism background
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                
+                // Subtle gradient overlay for depth
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.3),
+                                Color.white.opacity(0.05)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(SPDesignSystem.Colors.glassBorder, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.3), lineWidth: 1.5)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(SPDesignSystem.Colors.glassBorder.opacity(0.5), lineWidth: 0.5)
+                .offset(y: 1)
+        )
+        // 3D Shadow effect
+        .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+        .shadow(color: .black.opacity(0.08), radius: 2, x: 0, y: 1)
+    }
+    
+    private var speciesIcon: some View {
+        Group {
+            switch species.lowercased() {
+            case "dog":
+                Image(systemName: "dog.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundColor(.gray.opacity(0.35))
+                    .padding(24)
+            case "cat":
+                Image(systemName: "cat.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundColor(.gray.opacity(0.35))
+                    .padding(24)
+            case "bird":
+                Image(systemName: "bird.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundColor(.gray.opacity(0.35))
+                    .padding(24)
+            case "critter", "hamster", "mouse", "rat":
+                Image(systemName: "hare.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundColor(.gray.opacity(0.35))
+                    .padding(24)
+            case "fish":
+                Image(systemName: "drop.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundColor(.blue.opacity(0.35))
+                    .padding(24)
+            case "rabbit":
+                Image(systemName: "oval.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundColor(.gray.opacity(0.35))
+                    .padding(28)
+            case "reptile", "lizard", "snake":
+                Image(systemName: "oval")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundColor(.green.opacity(0.35))
+                    .padding(24)
+            default:
+                Image(systemName: "pawprint.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundColor(.gray.opacity(0.35))
+                    .padding(24)
+            }
+        }
     }
 }
 
@@ -391,6 +477,15 @@ private struct AddPetSheet: View {
     }
 }
 
+// MARK: - Custom Button Style for Pet Cards
+struct PetCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: configuration.isPressed)
+    }
+}
+
 // MARK: - Safe accessors for optional model fields
 private extension PetDataService.Pet {
     // Use reflection to safely read properties if model shape differs.
@@ -410,10 +505,6 @@ private extension PetDataService.Pet {
     }
 }
 
-extension Notification.Name {
-    static let petsDidChange = Notification.Name("petsDidChange")
-}
-
 // MARK: - Category Page (centered cards, consistent size, safe padding)
 private struct CategoryPage: View {
     let type: OwnerPetsView.PetType
@@ -424,7 +515,7 @@ private struct CategoryPage: View {
         GeometryReader { geo in
             let horizontalPadding: CGFloat = 20
             let verticalPadding: CGFloat = 20
-            let cardWidth = geo.size.width - (horizontalPadding * 2)
+            // Swift 6: removed unused cardWidth calculation
 
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(spacing: 16) {
@@ -447,8 +538,10 @@ private struct CategoryPage: View {
                         ]
                         LazyVGrid(columns: columns, alignment: .center, spacing: 12) {
                             ForEach(pets) { pet in
-                                PetGridCard(name: pet.name, photoURL: pet.photoURL)
-                                    .onTapGesture { onTap(pet) }
+                                Button(action: { onTap(pet) }) {
+                                    PetGridCard(name: pet.name, photoURL: pet.photoURL, species: pet.species)
+                                }
+                                .buttonStyle(PetCardButtonStyle())
                             }
                         }
                         .frame(maxWidth: .infinity)

@@ -1,4 +1,5 @@
 import SwiftUI
+internal import os
 
 struct OwnerServicesView: View {
     @EnvironmentObject var serviceBookings: ServiceBookingDataService
@@ -70,9 +71,13 @@ private struct FilterChip: View {
 
 private struct ServiceBookingFullCard: View {
     let booking: ServiceBooking
+    @State private var showRescheduleSheet: Bool = false
+    @State private var showCancelAlert: Bool = false
+    @EnvironmentObject var serviceBookings: ServiceBookingDataService
+    
     var body: some View {
         SPCard {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(booking.serviceType).font(.headline)
@@ -120,7 +125,58 @@ private struct ServiceBookingFullCard: View {
                         .foregroundColor(.secondary)
                         .lineLimit(3)
                 }
+                
+                // Quick action buttons for eligible bookings
+                if canModifyBooking() {
+                    HStack(spacing: 12) {
+                        Button("Reschedule") {
+                            showRescheduleSheet = true
+                        }
+                        .buttonStyle(.bordered)
+                        .foregroundColor(.blue)
+                        
+                        Button("Cancel") {
+                            showCancelAlert = true
+                        }
+                        .buttonStyle(.bordered)
+                        .foregroundColor(.red)
+                        
+                        Spacer()
+                    }
+                }
             }
+        }
+        .sheet(isPresented: $showRescheduleSheet) {
+            SimpleRescheduleSheet(booking: booking)
+        }
+        .alert("Cancel Booking", isPresented: $showCancelAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Confirm Cancel", role: .destructive) {
+                Task {
+                    await cancelBooking()
+                }
+            }
+        } message: {
+            Text("Are you sure you want to cancel this booking? You may be eligible for a refund based on our cancellation policy.")
+        }
+    }
+    
+    private func canModifyBooking() -> Bool {
+        let now = Date()
+        let hoursUntilVisit = booking.scheduledDate.timeIntervalSince(now) / 3600
+        
+        // Can modify if booking is pending or approved, and more than 2 hours before visit
+        return (booking.status == .pending || booking.status == .approved) && 
+               hoursUntilVisit > 2 && 
+               booking.scheduledDate > now
+    }
+    
+    private func cancelBooking() async {
+        do {
+            let result = try await serviceBookings.cancelBooking(bookingId: booking.id, reason: "Cancelled by client")
+            AppLogger.ui.info("Booking cancelled: \(result.refundMessage)")
+        } catch {
+            AppLogger.ui.error("Failed to cancel booking: \(error.localizedDescription)")
         }
     }
 }

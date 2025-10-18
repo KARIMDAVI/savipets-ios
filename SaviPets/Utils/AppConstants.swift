@@ -13,6 +13,8 @@ enum AppConstants {
     }
     
     enum Firebase {
+        // Note: App ID is a client-side identifier, not sensitive.
+        // For better configuration management, consider loading from GoogleService-Info.plist
         static let appId = "1:367657554735:ios:05871c65559a6a40b007da"
     }
     

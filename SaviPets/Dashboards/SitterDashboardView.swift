@@ -1,8 +1,36 @@
 import SwiftUI
+import OSLog
 import FirebaseAuth
 import FirebaseFirestore
 import Combine
 import CoreLocation
+
+// MARK: - Shared Date Formatters
+
+private struct DateFormatters {
+    static let shared = DateFormatters()
+    
+    let timeFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "h:mm a"
+        return df
+    }()
+    
+    let fullDateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateStyle = .full
+        return df
+    }()
+    
+    let shortTimeFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.timeStyle = .short
+        return df
+    }()
+    
+    private init() {}
+}
 
 private struct VisitItem: Identifiable {
     let id: String
@@ -14,7 +42,9 @@ private struct VisitItem: Identifiable {
     let serviceSummary: String
     let petName: String
     let petPhotoURL: String?
-    let status: String
+    let petNames: [String]  // Array of pet names
+    let petPhotoURLs: [String]  // Array of pet photo URLs
+    let status: VisitStatus
     let checkIn: Date?
     let checkOut: Date?
 }
@@ -37,7 +67,7 @@ private struct RecentPetPhoto: Identifiable {
     let visitDate: Date
 }
 
-private enum DateRange: String, CaseIterable {
+private enum SitterDateRange: String, CaseIterable {
     case week = "Week"
     case month = "Month"
     case quarter = "Quarter"
@@ -52,11 +82,21 @@ struct SitterDashboardView: View {
 	
 	// Active hours tracking
 	@State private var dailyActiveHours: [DailyActiveHours] = []
-	@State private var selectedDateRange: DateRange = .week
+	@State private var selectedDateRange: SitterDateRange = .week
 	@State private var isLoadingActiveHours: Bool = false
 	
 	// Recent pets tracking
 	@State private var recentPetPhotos: [RecentPetPhoto] = []
+	
+	// Listener management
+	@State private var visitsListener: ListenerRegistration?
+	
+	// Track pending Firestore writes for visual feedback
+	@State private var pendingWrites: Set<String> = []
+	
+	// Track actual start/end times per visit for real-time updates
+	@State private var actualStartTimes: [String: Date] = [:]  // visitId: actualStartTime
+	@State private var actualEndTimes: [String: Date] = [:]    // visitId: actualEndTime
 
 	private var sitterUid: String? { Auth.auth().currentUser?.uid }
 	private var isToday: Bool { Calendar.current.isDate(selectedDay, inSameDayAs: Date()) }
@@ -74,7 +114,7 @@ struct SitterDashboardView: View {
             ActiveHoursView
                 .tabItem { Label("Active", systemImage: "figure.walk") }
                 .tag(1)
-            SitterMessagesTab(selectedClientName: selectedClientForMessage)
+            ModernConversationListView()
                 .tabItem { Label("Messages", systemImage: "bubble.left.and.bubble.right.fill") }
                 .tag(2)
             SitterProfileView()
@@ -115,7 +155,13 @@ struct SitterDashboardView: View {
                 serviceBookings.listenToPendingBookings()
                 loadRecentPetPhotos()
             }
-			.onChange(of: selectedDay) { _ in loadVisits() }
+            .onDisappear {
+                visitsListener?.remove()
+                visitsListener = nil
+            }
+			.onChange(of: selectedDay) { _ in 
+				loadVisitsRealtime() // Reload with new realtime listener for new day
+			}
 		}
 	}
 
@@ -175,7 +221,10 @@ struct SitterDashboardView: View {
 						}
 					),
 					navigateToMessages: $navigateToMessages,
-					selectedClientForMessage: $selectedClientForMessage
+					selectedClientForMessage: $selectedClientForMessage,
+					pendingWrites: $pendingWrites,
+					actualStartTimes: $actualStartTimes,
+					actualEndTimes: $actualEndTimes
 				)
 			}
 		}
@@ -242,78 +291,181 @@ struct SitterDashboardView: View {
 	}
 
     // MARK: - Data loading
-    private func loadVisits() {
-		guard let sitterUid else { visits = []; return }
-		let db = Firestore.firestore()
+    private func loadVisitsRealtime() {
+		guard let sitterUid else { 
+			DispatchQueue.main.async {
+				self.visits = []
+			}
+			return 
+		}
+		
 		let cal = Calendar.current
 		let dayStart = cal.startOfDay(for: selectedDay)
 		let dayEnd = cal.date(byAdding: .day, value: 1, to: dayStart) ?? selectedDay
-
-		// Replace with your actual schema fields
-        db.collection("visits")
+		
+		// Remove existing listener before creating new one
+		visitsListener?.remove()
+		
+		// Set up realtime listener for the selected day
+		visitsListener = Firestore.firestore().collection("visits")
 			.whereField("sitterId", isEqualTo: sitterUid)
 			.whereField("scheduledStart", isGreaterThanOrEqualTo: Timestamp(date: dayStart))
 			.whereField("scheduledStart", isLessThan: Timestamp(date: dayEnd))
 			.order(by: "scheduledStart")
-			.getDocuments { snap, err in
-				guard err == nil, let snap else { self.visits = []; return }
+			.addSnapshotListener { snapshot, error in
+				if let error = error {
+					AppLogger.ui.error("Error loading visits: \(error.localizedDescription)")
+					return
+				}
+				
+				guard let snapshot = snapshot else {
+					DispatchQueue.main.async {
+						self.visits = []
+					}
+					return
+				}
+				
+			// Skip processing ONLY snapshots with pending writes to prevent UI showing stale data
+			if snapshot.metadata.hasPendingWrites {
+				AppLogger.ui.debug("Skipping snapshot with pending writes (isFromCache: \(snapshot.metadata.isFromCache))")
+				return
+			}
+			
+			// CRITICAL FIX: Skip cached snapshots if we have ANY pending Firestore writes
+			// This prevents cached data from overwriting our optimistic UI updates (like undo)
+			if snapshot.metadata.isFromCache && !self.pendingWrites.isEmpty {
+				AppLogger.ui.debug("Skipping CACHED snapshot because we have pending writes: \(self.pendingWrites)")
+				return
+			}
+			
+			// Process all other snapshots (fresh server data or cache when no pending writes)
+			// Debug logging to track snapshot source
+			#if DEBUG
+			AppLogger.ui.info("Processing snapshot: isFromCache=\(snapshot.metadata.isFromCache), hasPendingWrites=\(snapshot.metadata.hasPendingWrites), pendingWrites=\(self.pendingWrites)")
+			#endif
+				
+				let documents = snapshot.documents
+				if documents.isEmpty {
+					DispatchQueue.main.async {
+						self.visits = []
+					}
+					return
+				}
+				
 				var items: [VisitItem] = []
-				for d in snap.documents {
-					let data = d.data()
+				var newActualStartTimes: [String: Date] = [:]
+				var newActualEndTimes: [String: Date] = [:]
+				
+				for document in documents {
+					let data = document.data()
+					let visitId = document.documentID
 					let start = (data["scheduledStart"] as? Timestamp)?.dateValue() ?? dayStart
 					let end = (data["scheduledEnd"] as? Timestamp)?.dateValue() ?? start
 					let clientName = data["clientName"] as? String ?? ""
 					let address = data["address"] as? String ?? ""
 					let note = data["note"] as? String ?? ""
 					let service = data["serviceSummary"] as? String ?? ""
-					let pets = (data["pets"] as? [String])?.joined(separator: ", ") ?? (data["petName"] as? String ?? "")
-                    let firstPhoto = (data["petPhotoURLs"] as? [String])?.first
-                    let status = data["status"] as? String ?? "scheduled"
-                    let checkIn = ((data["timeline"] as? [String: Any])?["checkIn"] as? [String: Any])?["timestamp"] as? Timestamp
-                    let checkOut = ((data["timeline"] as? [String: Any])?["checkOut"] as? [String: Any])?["timestamp"] as? Timestamp
-                    items.append(VisitItem(id: d.documentID, start: start, end: end, clientName: clientName, address: address, note: note, serviceSummary: service, petName: pets, petPhotoURL: firstPhoto, status: status, checkIn: checkIn?.dateValue(), checkOut: checkOut?.dateValue()))
+					
+					// Get pet names as array
+					let petNamesArray = (data["pets"] as? [String]) ?? []
+					let pets = petNamesArray.isEmpty ? (data["petName"] as? String ?? "") : petNamesArray.joined(separator: ", ")
+					
+					// Get pet photo URLs as array
+					let petPhotoURLsArray = (data["petPhotoURLs"] as? [String]) ?? []
+					let firstPhoto = petPhotoURLsArray.first
+					
+					// DEBUG: Log address data for each visit
+					AppLogger.ui.debug("Visit \(visitId): address from Firestore = '\(address)' (isEmpty: \(address.isEmpty))")
+					
+					// Parse status using VisitStatus enum
+					let statusString = data["status"] as? String ?? "scheduled"
+					let status = VisitStatus(rawValue: statusString) ?? .scheduled
+					
+					let checkIn = ((data["timeline"] as? [String: Any])?["checkIn"] as? [String: Any])?["timestamp"] as? Timestamp
+					let checkOut = ((data["timeline"] as? [String: Any])?["checkOut"] as? [String: Any])?["timestamp"] as? Timestamp
+					
+					// Track actual start/end times in dedicated dictionaries for real-time access
+					if let checkInDate = checkIn?.dateValue() {
+						newActualStartTimes[visitId] = checkInDate
+						
+						// Log timeline changes
+						if let previousStart = self.actualStartTimes[visitId] {
+							if previousStart != checkInDate {
+								AppLogger.ui.info("Visit \(visitId): checkIn CHANGED from \(previousStart) to \(checkInDate)")
+							}
+						} else {
+							AppLogger.ui.info("Visit \(visitId): checkIn SET to \(checkInDate)")
+						}
+					} else {
+						// Log when checkIn is removed (undo)
+						if self.actualStartTimes[visitId] != nil {
+							AppLogger.data.info("Visit \(visitId): checkIn REMOVED (undo)")
+						}
+					}
+					
+					if let checkOutDate = checkOut?.dateValue() {
+						newActualEndTimes[visitId] = checkOutDate
+						
+						// Log timeline changes
+						if let previousEnd = self.actualEndTimes[visitId] {
+							if previousEnd != checkOutDate {
+								AppLogger.ui.info("Visit \(visitId): checkOut CHANGED from \(previousEnd) to \(checkOutDate)")
+							}
+						} else {
+							AppLogger.ui.info("Visit \(visitId): checkOut SET to \(checkOutDate)")
+						}
+					}
+					
+					// Debug logging for checkIn timestamp
+					#if DEBUG
+					if status == .inAdventure || status == .completed {
+						if checkIn?.dateValue() != nil {
+							AppLogger.ui.info("Visit \(visitId): checkIn loaded = \(String(describing: checkIn?.dateValue()))")
+						} else {
+							AppLogger.ui.warning("Visit \(visitId): checkIn is NIL despite status = \(statusString)")
+						}
+					}
+					#endif
+					
+					items.append(VisitItem(
+						id: document.documentID,
+						start: start,
+						end: end,
+						clientName: clientName,
+						address: address,
+						note: note,
+						serviceSummary: service,
+						petName: pets,
+						petPhotoURL: firstPhoto,
+						petNames: petNamesArray,
+						petPhotoURLs: petPhotoURLsArray,
+						status: status,
+						checkIn: checkIn?.dateValue(),
+						checkOut: checkOut?.dateValue()
+					))
 				}
-				self.visits = items.sorted { $0.start < $1.start }
+				
+				// Update actual start/end times dictionaries on main thread
+				DispatchQueue.main.async {
+					self.actualStartTimes = newActualStartTimes
+					self.actualEndTimes = newActualEndTimes
+				}
+				
+				// Update visits array on main thread
+				DispatchQueue.main.async {
+					self.visits = items.sorted { $0.start < $1.start }
+				}
+				
+				AppLogger.ui.info("Loaded \(items.count) visits, \(newActualStartTimes.count) with actual start times, \(newActualEndTimes.count) with actual end times")
 			}
-	}
-
-    private func loadVisitsRealtime() {
-        guard let sitterUid else { visits = []; return }
-        let db = Firestore.firestore()
-        let cal = Calendar.current
-        let dayStart = cal.startOfDay(for: selectedDay)
-        let dayEnd = cal.date(byAdding: .day, value: 1, to: dayStart) ?? selectedDay
-        db.collection("visits")
-            .whereField("sitterId", isEqualTo: sitterUid)
-            .whereField("scheduledStart", isGreaterThanOrEqualTo: Timestamp(date: dayStart))
-            .whereField("scheduledStart", isLessThan: Timestamp(date: dayEnd))
-            .order(by: "scheduledStart")
-            .addSnapshotListener { snap, err in
-                guard err == nil, let snap else { self.visits = []; return }
-                var items: [VisitItem] = []
-                for d in snap.documents {
-                    let data = d.data()
-                    let start = (data["scheduledStart"] as? Timestamp)?.dateValue() ?? dayStart
-                    let end = (data["scheduledEnd"] as? Timestamp)?.dateValue() ?? start
-                    let clientName = data["clientName"] as? String ?? ""
-                    let address = data["address"] as? String ?? ""
-                    let note = data["note"] as? String ?? ""
-                    let service = data["serviceSummary"] as? String ?? ""
-                    let pets = (data["pets"] as? [String])?.joined(separator: ", ") ?? (data["petName"] as? String ?? "")
-                    let firstPhoto = (data["petPhotoURLs"] as? [String])?.first
-                    let status = data["status"] as? String ?? "scheduled"
-                    let checkIn = ((data["timeline"] as? [String: Any])?["checkIn"] as? [String: Any])?["timestamp"] as? Timestamp
-                    let checkOut = ((data["timeline"] as? [String: Any])?["checkOut"] as? [String: Any])?["timestamp"] as? Timestamp
-                    items.append(VisitItem(id: d.documentID, start: start, end: end, clientName: clientName, address: address, note: note, serviceSummary: service, petName: pets, petPhotoURL: firstPhoto, status: status, checkIn: checkIn?.dateValue(), checkOut: checkOut?.dateValue()))
-                }
-                self.visits = items.sorted { $0.start < $1.start }
-		}
 	}
     
     // MARK: - Recent Pet Photos Loading
     private func loadRecentPetPhotos() {
         guard let sitterUid else { 
-            recentPetPhotos = []
+            DispatchQueue.main.async {
+                self.recentPetPhotos = []
+            }
             return 
         }
         
@@ -324,13 +476,23 @@ struct SitterDashboardView: View {
         // Get recent completed visits from the last week
         db.collection("visits")
             .whereField("sitterId", isEqualTo: sitterUid)
-            .whereField("status", isEqualTo: "completed")
+            .whereField("status", isEqualTo: VisitStatus.completed.rawValue)
             .whereField("scheduledStart", isGreaterThanOrEqualTo: Timestamp(date: weekAgo))
             .order(by: "scheduledStart", descending: true)
             .limit(to: 20) // Get more visits to ensure we have enough unique pets
             .getDocuments { [self] snapshot, error in
-                guard error == nil, let snapshot = snapshot else {
-                    self.recentPetPhotos = []
+                if let error = error {
+                    AppLogger.ui.error("Error loading recent pet photos: \(error.localizedDescription)")
+                    DispatchQueue.main.async {
+                        self.recentPetPhotos = []
+                    }
+                    return
+                }
+                
+                guard let snapshot = snapshot else {
+                    DispatchQueue.main.async {
+                        self.recentPetPhotos = []
+                    }
                     return
                 }
                 
@@ -356,10 +518,12 @@ struct SitterDashboardView: View {
                 }
                 
                 // Convert to array and sort by most recent visit date
-                self.recentPetPhotos = Array(uniquePets.values)
-                    .sorted { $0.visitDate > $1.visitDate }
-                    .prefix(6) // Limit to 6 most recent unique pets
-                    .map { $0 }
+                DispatchQueue.main.async {
+                    self.recentPetPhotos = Array(uniquePets.values)
+                        .sorted { $0.visitDate > $1.visitDate }
+                        .prefix(6) // Limit to 6 most recent unique pets
+                        .map { $0 }
+                }
             }
     }
     
@@ -412,9 +576,19 @@ struct SitterDashboardView: View {
                         let address = data["address"] as? String ?? ""
                         let note = data["note"] as? String ?? ""
                         let service = data["serviceSummary"] as? String ?? ""
-                        let pets = (data["pets"] as? [String])?.joined(separator: ", ") ?? (data["petName"] as? String ?? "")
-                        let firstPhoto = (data["petPhotoURLs"] as? [String])?.first
-                        let status = data["status"] as? String ?? "scheduled"
+                        
+                        // Get pet names as array
+                        let petNamesArray = (data["pets"] as? [String]) ?? []
+                        let pets = petNamesArray.isEmpty ? (data["petName"] as? String ?? "") : petNamesArray.joined(separator: ", ")
+                        
+                        // Get pet photo URLs as array
+                        let petPhotoURLsArray = (data["petPhotoURLs"] as? [String]) ?? []
+                        let firstPhoto = petPhotoURLsArray.first
+                        
+                        // Parse status using VisitStatus enum
+                        let statusString = data["status"] as? String ?? "scheduled"
+                        let status = VisitStatus(rawValue: statusString) ?? .scheduled
+                        
                         let checkIn = ((data["timeline"] as? [String: Any])?["checkIn"] as? [String: Any])?["timestamp"] as? Timestamp
                         let checkOut = ((data["timeline"] as? [String: Any])?["checkOut"] as? [String: Any])?["timestamp"] as? Timestamp
                         
@@ -428,6 +602,8 @@ struct SitterDashboardView: View {
                             serviceSummary: service,
                             petName: pets,
                             petPhotoURL: firstPhoto,
+                            petNames: petNamesArray,
+                            petPhotoURLs: petPhotoURLsArray,
                             status: status,
                             checkIn: checkIn?.dateValue(),
                             checkOut: checkOut?.dateValue()
@@ -481,7 +657,7 @@ struct SitterDashboardView: View {
 						.font(.headline)
 					Spacer()
 					Picker("Date Range", selection: $selectedDateRange) {
-						ForEach(DateRange.allCases, id: \.self) { range in
+						ForEach(SitterDateRange.allCases, id: \.self) { range in
 							Text(range.rawValue).tag(range)
 						}
 					}
@@ -529,73 +705,7 @@ struct SitterDashboardView: View {
 	}
 }
 
-private struct SitterMessagesTab: View {
-    @EnvironmentObject var chat: ChatService
-    @State private var selectedConversationId: String? = nil
-    @State private var input: String = ""
-    @State private var showNewMessageSheet: Bool = false
-    let selectedClientName: String?
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                List {
-                    Section("Conversations") {
-                        ForEach(chat.conversations) { convo in
-                            Button(action: { selectedConversationId = convo.id }) {
-                                VStack(alignment: .leading) {
-                                    Text(convo.participants.joined(separator: ", "))
-                                        .font(.headline)
-                                    Text(convo.lastMessage)
-                                        .font(.subheadline)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        }
-                    }
-                    
-                    Section("Quick Actions") {
-                        Button(action: { showNewMessageSheet = true }) {
-                            HStack {
-                                Image(systemName: "plus.circle.fill")
-                                    .foregroundColor(.blue)
-                                Text("Start New Conversation")
-                                    .foregroundColor(.primary)
-                            }
-                        }
-                    }
-                }
-                .listStyle(InsetGroupedListStyle())
-            }
-            .navigationTitle("Messages")
-            .onAppear { 
-                chat.listenToMyConversations()
-                // Check if we should open a specific conversation
-                if let clientName = selectedClientName {
-                    // Try to find existing conversation with this client
-                    if let existingConvo = chat.conversations.first(where: { 
-                        $0.participants.contains(clientName) 
-                    }) {
-                        selectedConversationId = existingConvo.id
-                    } else {
-                        // Show new message sheet for this client
-                        showNewMessageSheet = true
-                    }
-                }
-            }
-            .sheet(item: Binding(get: {
-                selectedConversationId.map { ChatSheetId(id: $0) }
-            }, set: { v in selectedConversationId = v?.id })) { item in
-                ConversationChatView(conversationId: item.id)
-                    .environmentObject(chat)
-            }
-            .sheet(isPresented: $showNewMessageSheet) {
-                NewMessageView(selectedClientName: selectedClientName)
-                    .environmentObject(chat)
-            }
-        }
-    }
-}
+// Modern messaging components are now in ModernChatView.swift
 
 // MARK: - Calendar Tab
 private struct SitterCalendarView: View {
@@ -604,6 +714,9 @@ private struct SitterCalendarView: View {
     @Binding var expandedCards: Set<String>
     @Binding var navigateToMessages: Bool
     @Binding var selectedClientForMessage: String?
+    @Binding var pendingWrites: Set<String>
+    @Binding var actualStartTimes: [String: Date]
+    @Binding var actualEndTimes: [String: Date]
     var onChangeDay: (Date) -> Void = { _ in }
 
     var body: some View {
@@ -645,7 +758,10 @@ private struct SitterCalendarView: View {
                                         }
                                     ),
                                     navigateToMessages: $navigateToMessages,
-                                    selectedClientForMessage: $selectedClientForMessage
+                                    selectedClientForMessage: $selectedClientForMessage,
+                                    pendingWrites: $pendingWrites,
+                                    actualStartTimes: $actualStartTimes,
+                                    actualEndTimes: $actualEndTimes
                                 )
                             }
                         }
@@ -703,105 +819,183 @@ private struct SitterCalendarView: View {
 private struct VisitCard: View {
 	let visit: VisitItem
 	@Binding var isExpanded: Bool
-	@State private var started: Bool = false
-	@State private var startTime: Date? = nil
 	@State private var tick: Date = Date()
+	@State private var isTimerActive: Bool = false // Explicit flag to control timer
 	@State private var showDraft: Bool = false
 	@State private var draftText: String = ""
 	@State private var showCompleteConfirm: Bool = false
-	@State private var isCompleted: Bool = false
+	@State private var showUndoConfirm: Bool = false
 	@State private var showPetImageZoom: Bool = false
-	@State private var endTime: Date? = nil
 	@State private var showClientDetails: Bool = false
 	@Binding var navigateToMessages: Bool
 	@Binding var selectedClientForMessage: String?
+	@Binding var pendingWrites: Set<String>
+	@Binding var actualStartTimes: [String: Date]
+	@Binding var actualEndTimes: [String: Date]
 	@State private var fiveMinuteWarningSent: Bool = false
+	@State private var errorMessage: String?
+	@State private var showError: Bool = false
 	
-	// Initialize timer state based on visit status
-	private var isVisitStarted: Bool {
-		// Prioritize local state over Firestore status for immediate UI updates
-		if started && startTime != nil {
-			return true
-		}
-		// Fallback to Firestore status for visits that were started elsewhere
-		return visit.status == "in_adventure" || visit.status == "completed"
+	// Track if this specific visit has a pending write
+	private var isPendingWrite: Bool {
+		return pendingWrites.contains(visit.id)
 	}
 	
-	private var isVisitCompleted: Bool {
-		// Prioritize local state over Firestore status for immediate UI updates
-		if isCompleted && endTime != nil {
-			return true
-		}
-		// Fallback to Firestore status for visits that were completed elsewhere
-		return visit.status == "completed"
-	}
+	// MARK: - Scheduled Times (Never Change)
 	
-	private var actualStartTime: Date {
-		// Use the actual checkIn time from Firestore if available
-		if let checkInTime = visit.checkIn {
-			return checkInTime
-		}
-		// Fallback to the visit's scheduled start time
+	private var scheduledStartTime: Date {
 		return visit.start
 	}
 	
-	private var visitEndTime: Date {
-		// Use the actual checkout time from Firestore if available
-		if let checkOutTime = visit.checkOut {
-			return checkOutTime
-		}
-		// Fallback to the visit's scheduled end time
+	private var scheduledEndTime: Date {
 		return visit.end
+	}
+	
+	// MARK: - Actual Times (Set when sitter taps Start/End)
+	
+	private var actualStartTime: Date? {
+		// actualStartTimes dictionary is the ONLY source of truth
+		// Do NOT fall back to visit.checkIn as it may have stale cached data
+		return actualStartTimes[visit.id]
+	}
+	
+	private var actualEndTime: Date? {
+		// actualEndTimes dictionary is the ONLY source of truth
+		// Do NOT fall back to visit.checkOut as it may have stale cached data
+		return actualEndTimes[visit.id]
+	}
+	
+	// MARK: - State Computed from Firestore Data ONLY
+	
+	private var isVisitStarted: Bool {
+		// actualStartTime is the ONLY source of truth for UI state
+		// This ensures instant UI updates when we optimistically update actualStartTimes
+		return actualStartTime != nil
+	}
+	
+	private var isVisitCompleted: Bool {
+		// actualEndTime is the ONLY source of truth for UI state
+		// This ensures instant UI updates when we optimistically update actualEndTimes
+		return actualEndTime != nil
 	}
 
     private var timeRange: String {
-        let df = DateFormatter(); df.locale = Locale(identifier: "en_US_POSIX"); df.dateFormat = "h:mm a"
+        let df = DateFormatters.shared.timeFormatter
         return "\(df.string(from: visit.start)) - \(df.string(from: visit.end))"
     }
 
+	// MARK: - Timer Calculations (Based on Actual Times)
+	
 	private var timeLeftString: String {
-		let now = tick // Use tick instead of Date() for reactive updates
-		let elapsed = now.timeIntervalSince(actualStartTime)
-		let totalDuration = visit.end.timeIntervalSince(visit.start)
-		let remaining = max(totalDuration - elapsed, 0)
+		// SERVICE DURATION is always: scheduledEnd - scheduledStart (e.g., 15 minutes, 30 minutes)
+		let serviceDuration = scheduledEndTime.timeIntervalSince(scheduledStartTime)
 		
-		let mins = Int(remaining) / 60
-		let secs = Int(remaining) % 60
-		
-		// Return overtime indicator if past scheduled end time
-		if elapsed > totalDuration {
-			let overtime = Int(elapsed - totalDuration)
-			let overtimeMins = overtime / 60
-			let overtimeSecs = overtime % 60
-			return String(format: "+%dm %02ds", overtimeMins, overtimeSecs)
+		guard let startTime = actualStartTime else {
+			// Not started yet - show full service duration
+			let mins = Int(serviceDuration) / 60
+			let secs = Int(serviceDuration) % 60
+			return String(format: "%02d:%02d", mins, secs)
 		}
 		
-		return String(format: "%dm %02ds", mins, secs)
+		// Started - calculate remaining time based on service duration
+		let now = tick // Use tick for reactive updates
+		let elapsed = now.timeIntervalSince(startTime)
+		let remaining = serviceDuration - elapsed
+		
+		// Return overtime indicator if past service duration
+		if remaining < 0 {
+			let overtime = Int(abs(remaining))
+			let overtimeMins = overtime / 60
+			let overtimeSecs = overtime % 60
+			return "+" + String(format: "%02d:%02d", overtimeMins, overtimeSecs)
+		}
+		
+		// Normal countdown in MM:SS format
+		let mins = Int(remaining) / 60
+		let secs = Int(remaining) % 60
+		return String(format: "%02d:%02d", mins, secs)
+	}
+	
+	private var elapsedTimeString: String {
+		guard let startTime = actualStartTime else {
+			return "00:00"
+		}
+		
+		let endTime = actualEndTime ?? tick // Use actual end if completed, otherwise now
+		let elapsed = max(0, endTime.timeIntervalSince(startTime)) // Prevent negative elapsed time
+		
+		let hours = Int(elapsed) / 3600
+		let minutes = (Int(elapsed) % 3600) / 60
+		let seconds = Int(elapsed) % 60
+		
+		if hours > 0 {
+			return String(format: "%dh %02dm %02ds", hours, minutes, seconds)
+		} else {
+			return String(format: "%02d:%02d", minutes, seconds)
+		}
 	}
 	
 	private var isOvertime: Bool {
-		let now = tick // Use tick for reactive updates
-		let elapsed = now.timeIntervalSince(actualStartTime)
-		let totalDuration = visit.end.timeIntervalSince(visit.start)
-		return elapsed > totalDuration
+		guard let startTime = actualStartTime else {
+			return false
+		}
+		
+		let now = tick
+		let elapsed = now.timeIntervalSince(startTime)
+		let serviceDuration = scheduledEndTime.timeIntervalSince(scheduledStartTime)
+		return elapsed > serviceDuration
 	}
 	
 	private var isFiveMinuteWarning: Bool {
-		let now = tick // Use tick for reactive updates
-		let elapsed = now.timeIntervalSince(actualStartTime)
-		let totalDuration = visit.end.timeIntervalSince(visit.start)
-		let remaining = max(totalDuration - elapsed, 0)
-		return remaining <= 300 && remaining > 0 // 5 minutes = 300 seconds
+		guard let startTime = actualStartTime else {
+			return false
+		}
+		
+		let now = tick
+		let elapsed = now.timeIntervalSince(startTime)
+		let serviceDuration = scheduledEndTime.timeIntervalSince(scheduledStartTime)
+		let remaining = serviceDuration - elapsed
+		return remaining > 0 && remaining <= 300 // 5 minutes = 300 seconds
 	}
     
     private func formatTime(_ date: Date) -> String {
-        let df = DateFormatter()
-        df.locale = Locale(identifier: "en_US_POSIX")
-        df.dateFormat = "h:mm a"
-        return df.string(from: date)
+        return DateFormatters.shared.timeFormatter.string(from: date)
     }
+	
+	// MARK: - Helper to show if sitter started early/late
+	
+	private var startTimeDifferenceText: String? {
+		guard let actualStart = actualStartTime else {
+			return nil
+		}
+		
+		let difference = actualStart.timeIntervalSince(scheduledStartTime)
+		let absMinutes = Int(abs(difference)) / 60
+		
+		guard absMinutes > 0 else {
+			return nil // Started on time
+		}
+		
+		if difference < 0 {
+			return "\(absMinutes)m early"
+		} else {
+			return "\(absMinutes)m late"
+		}
+	}
+	
+	// Check if sitter started 15+ minutes late (for red card indicator)
+	private var isSignificantlyLate: Bool {
+		guard let actualStart = actualStartTime else {
+			return false
+		}
+		
+		let difference = actualStart.timeIntervalSince(scheduledStartTime)
+		let minutesLate = difference / 60
+		return minutesLate >= 15 // 15 minutes or more late
+	}
 
-	var body: some View {
+	// Extract main content to reduce type-checking complexity
+	private var mainContent: some View {
 		VStack(spacing: 0) {
 			// Top slim bar with time range and direction arrow - Clickable for expand/collapse
             Button(action: { 
@@ -810,7 +1004,7 @@ private struct VisitCard: View {
 				}
 			}) {
 				HStack {
-					Label(timeRange, systemImage: visit.status == "completed" ? "checkmark.circle.fill" : "clock")
+					Label(timeRange, systemImage: visit.status.isCompleted ? "checkmark.circle.fill" : "clock")
 						.font(.subheadline)
 						.labelStyle(.titleAndIcon)
 					Spacer()
@@ -830,7 +1024,7 @@ private struct VisitCard: View {
 			.buttonStyle(PlainButtonStyle())
 			.background(
 				RoundedRectangle(cornerRadius: 12, style: .continuous)
-					.fill(visit.status == "completed" ? Color.green : Color.blue.opacity(0.08))
+					.fill(visit.status.isCompleted ? (isSignificantlyLate ? Color.red : Color.green) : Color.blue.opacity(0.08))
 			)
 
 			SPCard {
@@ -845,7 +1039,7 @@ private struct VisitCard: View {
 									// Timer status indicator next to client name
 									if isVisitStarted {
 										HStack(spacing: 4) {
-											Image(systemName: "figure.run")
+											Image(systemName: "timer")
 												.font(.caption)
 												.foregroundColor(Color(red: 184/255, green: 166/255, blue: 7/255))
 											Text(isVisitCompleted ? "Visit Ended" : "Running")
@@ -861,7 +1055,7 @@ private struct VisitCard: View {
 							Spacer()
 						}
 
-						// Event Note (only if owner left notes) - Always visible
+						// Event Note (only if owner left notes)
 						if !visit.note.isEmpty {
 							VStack(alignment: .leading, spacing: 4) {
 								Text("Event Note").font(.subheadline).bold()
@@ -869,82 +1063,190 @@ private struct VisitCard: View {
 							}
 						}
 
-						// Services & pet with image
-						HStack(alignment: .top, spacing: 12) {
-							VStack(alignment: .leading, spacing: 4) {
+						// Services & Pets
+						VStack(alignment: .leading, spacing: 12) {
+							// Service info
 							Text("Services: \(visit.serviceSummary)")
 								.font(.subheadline)
 								.bold()
 								.foregroundColor(.secondary)
-							Text("Pets: \(visit.petName)")
-								.font(.subheadline)
-								.foregroundColor(.blue)
-							}
 							
-							// Pet image (circular, like in reference)
-							if let urlString = visit.petPhotoURL, let url = URL(string: urlString) {
-								AsyncImage(url: url) { phase in
-									switch phase {
-									case .success(let image):
-										image
-											.resizable()
-											.aspectRatio(contentMode: .fill)
-											.frame(width: 60, height: 60)
-											.clipped()
-									case .empty: 
-										ProgressView()
-											.frame(width: 60, height: 60)
-									case .failure(_): 
-										Image(systemName: "pawprint.fill")
-											.foregroundColor(.gray)
-											.frame(width: 60, height: 60)
-											.background(Color.gray.opacity(0.2))
-									@unknown default: 
-										EmptyView()
-											.frame(width: 60, height: 60)
+							// Pets section with all pet images
+							VStack(alignment: .leading, spacing: 8) {
+								Text("Pets: \(visit.petName)")
+									.font(.subheadline)
+									.foregroundColor(.blue)
+								
+								// Show all pet images if available
+								if !visit.petPhotoURLs.isEmpty {
+									ScrollView(.horizontal, showsIndicators: false) {
+										HStack(spacing: 8) {
+											ForEach(Array(zip(visit.petPhotoURLs.indices, visit.petPhotoURLs)), id: \.0) { index, urlString in
+												if let url = URL(string: urlString) {
+													AsyncImage(url: url) { phase in
+														switch phase {
+														case .success(let image):
+															image
+																.resizable()
+																.aspectRatio(contentMode: .fill)
+																.frame(width: 60, height: 60)
+																.clipped()
+														case .empty: 
+															ProgressView()
+																.frame(width: 60, height: 60)
+														case .failure(_): 
+															Image(systemName: "pawprint.fill")
+																.foregroundColor(.gray)
+																.frame(width: 60, height: 60)
+																.background(Color.gray.opacity(0.2))
+														@unknown default: 
+															EmptyView()
+																.frame(width: 60, height: 60)
+														}
+													}
+													.clipShape(Circle())
+													.overlay(
+														Circle()
+															.stroke(Color.white, lineWidth: 2)
+													)
+												}
+											}
+										}
 									}
-								}
-								.clipShape(Circle())
-								.onTapGesture { 
-									showPetImageZoom = true
-								}
-							} else {
-								// Placeholder when no image
-								Image(systemName: "pawprint.fill")
-									.foregroundColor(.gray)
-									.frame(width: 60, height: 60)
-									.background(Color.gray.opacity(0.2))
+								} else if let urlString = visit.petPhotoURL, let url = URL(string: urlString) {
+									// Fallback to single pet photo if array is empty
+									AsyncImage(url: url) { phase in
+										switch phase {
+										case .success(let image):
+											image
+												.resizable()
+												.aspectRatio(contentMode: .fill)
+												.frame(width: 60, height: 60)
+												.clipped()
+										case .empty: 
+											ProgressView()
+												.frame(width: 60, height: 60)
+										case .failure(_): 
+											Image(systemName: "pawprint.fill")
+												.foregroundColor(.gray)
+												.frame(width: 60, height: 60)
+												.background(Color.gray.opacity(0.2))
+										@unknown default: 
+											EmptyView()
+												.frame(width: 60, height: 60)
+										}
+									}
 									.clipShape(Circle())
+								} else {
+									// No images available
+									Image(systemName: "pawprint.fill")
+										.foregroundColor(.gray)
+										.frame(width: 60, height: 60)
+										.background(Color.gray.opacity(0.2))
+										.clipShape(Circle())
+								}
 							}
 						}
 
 						// Bottom action bar (timer + details)
 						if isVisitStarted {
 							HStack {
-								VStack(alignment: .leading) {
-									Text(isVisitCompleted ? "Started" : "START")
-										.foregroundColor(isVisitCompleted ? .blue : .red)
+								VStack(alignment: .leading, spacing: 4) {
+									Text(isVisitCompleted ? "STARTED" : "START")
+										.font(.caption)
+										.foregroundColor(isVisitCompleted ? .blue : .green)
 										.bold()
-									Text(formatTime(actualStartTime))
+									HStack(spacing: 4) {
+										// Display actual start time with safe unwrapping
+										if let startTime = actualStartTime {
+											VStack(alignment: .leading, spacing: 2) {
+												Text(formatTime(startTime))
+													.font(.subheadline)
+													.fontWeight(.semibold)
+												// Show if started early/late
+												if let differenceText = startTimeDifferenceText {
+													Text(differenceText)
+														.font(.caption2)
+														.foregroundColor(.secondary)
+												}
+											}
+										} else {
+											Text("--:--")
+												.font(.subheadline)
+												.foregroundColor(.secondary)
+										}
+										// Show syncing indicator if write is pending
+										if isPendingWrite {
+											ProgressView()
+												.scaleEffect(0.7)
+												.foregroundColor(.orange)
+										}
+									}
 								}
+								
 								Spacer()
-								VStack(alignment: .trailing) {
+								
+								// Middle: Elapsed time
+								VStack(spacing: 4) {
+									Text("ELAPSED")
+										.font(.caption)
+										.foregroundColor(.secondary)
+										.bold()
+									Text(elapsedTimeString)
+										.font(.subheadline)
+										.fontWeight(.semibold)
+										.foregroundColor(.primary)
+								}
+								
+								Spacer()
+								
+								VStack(alignment: .trailing, spacing: 4) {
 									if isVisitCompleted {
-										Text("Visit Ended").foregroundColor(.blue).bold()
-										Text(formatTime(visitEndTime))
+										Text("ENDED")
+											.font(.caption)
+											.foregroundColor(.blue)
+											.bold()
+										HStack(spacing: 4) {
+											// Display actual end time with safe unwrapping
+											if let endTime = actualEndTime {
+												Text(formatTime(endTime))
+													.font(.subheadline)
+													.fontWeight(.semibold)
+											} else {
+												Text("--:--")
+													.font(.subheadline)
+													.foregroundColor(.secondary)
+											}
+											if isPendingWrite {
+												ProgressView()
+													.scaleEffect(0.7)
+													.foregroundColor(.orange)
+											}
+										}
 									} else {
-										Text("TIME LEFT").foregroundColor(.red).bold()
-										Text(timeLeftString)
-											.foregroundColor(isOvertime ? .red : (isFiveMinuteWarning ? .orange : .primary))
-											.fontWeight(isOvertime || isFiveMinuteWarning ? .bold : .regular)
+										Text("TIME LEFT")
+											.font(.caption)
+											.foregroundColor(isOvertime ? .red : (isFiveMinuteWarning ? .orange : .secondary))
+											.bold()
+										HStack(spacing: 4) {
+											Text(timeLeftString)
+												.font(.subheadline)
+												.foregroundColor(isOvertime ? .red : (isFiveMinuteWarning ? .orange : .primary))
+												.fontWeight(isOvertime || isFiveMinuteWarning ? .bold : .semibold)
+											if isPendingWrite {
+												ProgressView()
+													.scaleEffect(0.7)
+													.foregroundColor(.orange)
+											}
+										}
 									}
 								}
 							}
-							.padding(.vertical, 8)
-							.padding(.horizontal, 12)
+							.padding(.vertical, 12)
+							.padding(.horizontal, 16)
 							.background(
-								RoundedRectangle(cornerRadius: 8)
-									.fill(isOvertime ? Color.red.opacity(0.1) : (isFiveMinuteWarning ? Color.orange.opacity(0.1) : Color.clear))
+								RoundedRectangle(cornerRadius: 12)
+									.fill(isPendingWrite ? Color.orange.opacity(0.1) : (isOvertime ? Color.red.opacity(0.1) : (isFiveMinuteWarning ? Color.orange.opacity(0.1) : Color.gray.opacity(0.05))))
 							)
 						}
 
@@ -958,26 +1260,61 @@ private struct VisitCard: View {
 							// Only show timer button if visit is not completed
 							if !isVisitCompleted {
 								if isVisitStarted {
-									Image(systemName: "figure.run")
-										.font(.title3)
-										.foregroundColor(Color(red: 184/255, green: 166/255, blue: 7/255))
-								} else {
-									Text("Start Visit")
-										.font(.subheadline)
-										.foregroundColor(Color(red: 184/255, green: 166/255, blue: 7/255))
-										.onTapGesture { 
-											startVisit() 
+									// Show Undo button when visit is started but not completed
+									Button(action: { 
+										if !isPendingWrite {
+											showUndoConfirm = true
 										}
+									}) { 
+										HStack(spacing: 4) {
+											Image(systemName: "arrow.uturn.backward.circle")
+												.font(.caption)
+											Text("Undo")
+												.font(.caption)
+												.fontWeight(.medium)
+										}
+										.foregroundColor(.orange)
+									}
+									.buttonStyle(PlainButtonStyle())
+									.disabled(isPendingWrite)
+									.opacity(isPendingWrite ? 0.5 : 1.0)
+								} else {
+									HStack(spacing: 4) {
+										if isPendingWrite {
+											ProgressView()
+												.scaleEffect(0.8)
+										}
+										Text(isPendingWrite ? "Starting..." : "Start Visit")
+											.font(.subheadline)
+											.foregroundColor(Color(red: 184/255, green: 166/255, blue: 7/255))
+									}
+									.onTapGesture { 
+										if !isPendingWrite {
+											startVisit()
+										}
+									}
+									.opacity(isPendingWrite ? 0.6 : 1.0)
 								}
 							}
 							
 							if isVisitStarted && !isVisitCompleted {
-								Button(action: { showCompleteConfirm = true }) { 
-									Text("End Visit")
-										.font(.subheadline)
+								Button(action: { 
+									if !isPendingWrite {
+										showCompleteConfirm = true
+									}
+								}) { 
+									HStack(spacing: 4) {
+										if isPendingWrite {
+											ProgressView()
+												.scaleEffect(0.7)
+										}
+										Text(isPendingWrite ? "Saving..." : "End Visit")
+											.font(.subheadline)
+									}
 								}
 								.buttonStyle(GhostButtonStyle())
 								.controlSize(.small)
+								.disabled(isPendingWrite)
 							}
 						}
 					}
@@ -989,44 +1326,67 @@ private struct VisitCard: View {
 							Text(visit.serviceSummary).font(.subheadline).foregroundColor(.secondary)
 						}
 						Spacer()
-						if isVisitStarted {
-							HStack(spacing: 4) {
-								Image(systemName: "figure.run")
-									.font(.caption)
-									.foregroundColor(Color(red: 184/255, green: 166/255, blue: 7/255))
-								Text(isVisitCompleted ? "Completed" : "Running")
-									.font(.caption)
-									.fontWeight(.bold)
-									.foregroundColor(Color(red: 184/255, green: 166/255, blue: 7/255))
+						if isVisitStarted && !isVisitCompleted {
+							HStack(spacing: 8) {
+								HStack(spacing: 4) {
+									Image(systemName: "timer")
+										.font(.caption)
+										.foregroundColor(Color(red: 184/255, green: 166/255, blue: 7/255))
+									// Show elapsed time in collapsed view
+									Text(elapsedTimeString)
+										.font(.caption)
+										.fontWeight(.bold)
+										.foregroundColor(Color(red: 184/255, green: 166/255, blue: 7/255))
+								}
+								// Undo button in collapsed view
+								Button(action: { 
+									if !isPendingWrite {
+										showUndoConfirm = true
+									}
+								}) {
+									Image(systemName: "arrow.uturn.backward.circle.fill")
+										.font(.caption)
+										.foregroundColor(.orange)
+								}
+								.buttonStyle(PlainButtonStyle())
+								.disabled(isPendingWrite)
+							}
+						} else if isVisitCompleted {
+							VStack(alignment: .trailing, spacing: 2) {
+								HStack(spacing: 4) {
+									Image(systemName: "checkmark.circle.fill")
+										.font(.caption)
+										.foregroundColor(.blue)
+									Text("Completed")
+										.font(.caption)
+										.fontWeight(.bold)
+										.foregroundColor(.blue)
+								}
+								// Show actual duration in collapsed view for completed visits
+								Text("Duration: \(elapsedTimeString)")
+									.font(.caption2)
+									.foregroundColor(.secondary)
 							}
 						}
 					}
 				}
-			}
-			.onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
-				if isVisitStarted { 
-					tick = now
-					
-					// Send 5-minute warning notification
-					if isFiveMinuteWarning && !fiveMinuteWarningSent {
-						fiveMinuteWarningSent = true
-						NotificationService.shared.sendLocalNotification(
-							title: "Visit Ending Soon",
-							body: "Your visit with \(visit.clientName) ends in 5 minutes",
-							userInfo: ["visitId": visit.id, "type": "visit_warning"]
-						)
-					}
-				}
-			}
-			.onAppear {
-				// Timer state is now managed entirely through Firestore timestamps
-				// No need to initialize local state variables
 			}
 			.alert("Complete Visit?", isPresented: $showCompleteConfirm) {
                 Button("Yes, Complete") { completeVisit() }
 				Button("Back", role: .cancel) {}
 			} message: {
 				Text("you're about to mark this event as complete. Are you sure?")
+			}
+			.alert("Undo Timer?", isPresented: $showUndoConfirm) {
+				Button("Yes, Reset Timer", role: .destructive) { undoStartVisit() }
+				Button("Cancel", role: .cancel) {}
+			} message: {
+				Text("This will reset the visit timer back to 'Start Visit'. The visit will return to scheduled status and your check-in time will be removed.")
+			}
+			.alert("Error", isPresented: $showError) {
+				Button("OK", role: .cancel) {}
+			} message: {
+				Text(errorMessage ?? "An error occurred. Please try again.")
 			}
 		}
 		.background(
@@ -1036,7 +1396,7 @@ private struct VisitCard: View {
 		)
 		.overlay(
 			RoundedRectangle(cornerRadius: 16, style: .continuous)
-				.stroke(isCompleted ? SPDesignSystem.Colors.success : Color.clear, lineWidth: 2)
+				.stroke(isVisitCompleted ? SPDesignSystem.Colors.success : Color.clear, lineWidth: 2)
 		)
 		.sheet(isPresented: $showDraft) {
 			NavigationStack {
@@ -1235,48 +1595,227 @@ private struct VisitCard: View {
 			}
 		}
 	}
+	
+	// Body just applies lifecycle modifiers to main content
+	var body: some View {
+		mainContent
+			.onAppear {
+				// Initialize timer state based on visit status
+				// Activate timer if visit is started but not completed
+				if actualStartTime != nil && actualEndTime == nil {
+					isTimerActive = true
+					AppLogger.timer.info("Timer initialized as active for visit \(visit.id)")
+				} else {
+					isTimerActive = false
+					AppLogger.timer.info("Timer initialized as inactive for visit \(visit.id)")
+				}
+			}
+			.onChange(of: actualStartTimes) { newDict in
+				// Monitor the DICTIONARY directly (not the computed property)
+				let newStartTime = newDict[visit.id]
+				let newEndTime = actualEndTimes[visit.id]
+				
+				if newStartTime != nil && newEndTime == nil && !isPendingWrite {
+					isTimerActive = true
+					AppLogger.timer.info("Timer activated by dictionary update for visit \(visit.id)")
+				} else if newStartTime == nil {
+					isTimerActive = false
+					AppLogger.timer.info("Timer deactivated because actualStartTime was cleared from dictionary for visit \(visit.id)")
+				}
+			}
+			.onChange(of: actualEndTimes) { newDict in
+				// Monitor the DICTIONARY directly (not the computed property)
+				let newEndTime = newDict[visit.id]
+				
+				if newEndTime != nil {
+					isTimerActive = false
+					AppLogger.timer.info("Timer deactivated by dictionary update - visit completed \(visit.id)")
+				}
+			}
+			.onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
+				// ONLY tick if timer is explicitly active
+				// This ensures instant stop when isTimerActive is set to false
+				if isTimerActive { 
+					tick = now
+					
+					// Send 5-minute warning notification (only once per visit)
+					if isFiveMinuteWarning && !fiveMinuteWarningSent {
+						fiveMinuteWarningSent = true
+						AppLogger.ui.warning("Sending 5-minute warning for visit \(visit.id)")
+						NotificationService.shared.sendLocalNotification(
+							title: "Visit Ending Soon",
+							body: "Your visit with \(visit.clientName) scheduled end is in 5 minutes",
+							userInfo: ["visitId": visit.id, "type": "visit_warning"]
+						)
+					}
+				}
+			}
+	}
 
 	private func openInMaps() {
-		// Open client address in Apple Maps app (not web)
-		let encoded = visit.address.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-		if let url = URL(string: "maps://?daddr=\(encoded)") {
-			if UIApplication.shared.canOpenURL(url) {
-				UIApplication.shared.open(url)
-			} else {
-				// Fallback to Apple Maps web if native app not available
-				if let fallbackUrl = URL(string: "http://maps.apple.com/?daddr=\(encoded)") {
-					UIApplication.shared.open(fallbackUrl)
+		// Use Apple Maps with navigation to the pet owner's address
+		// Format: maps://?daddr=[address]&dirflg=d
+		// dirflg=d enables driving directions
+		
+		AppLogger.ui.debug("DEBUG openInMaps - visit.address RAW value: '\(visit.address)'")
+		
+		let addressToUse = visit.address.trimmingCharacters(in: .whitespacesAndNewlines)
+		
+		AppLogger.ui.debug("DEBUG openInMaps - addressToUse after trim: '\(addressToUse)' (isEmpty: \(addressToUse.isEmpty))")
+		
+		guard !addressToUse.isEmpty else {
+			AppLogger.ui.warning("No address available for navigation for visit \(visit.id)")
+			AppLogger.ui.info("No address - Client: \(visit.clientName), Service: \(visit.serviceSummary)")
+			return
+		}
+		
+		// Properly encode the address for URL
+		let encoded = addressToUse.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? addressToUse
+		
+		// Try to open in Apple Maps app with navigation mode
+		if let url = URL(string: "maps://?daddr=\(encoded)&dirflg=d") {
+			AppLogger.ui.info("Opening Maps to: \(addressToUse)")
+			UIApplication.shared.open(url, options: [:]) { success in
+				if !success {
+					AppLogger.ui.error("Failed to open Apple Maps")
+					// Fallback to Apple Maps web
+					if let webUrl = URL(string: "http://maps.apple.com/?daddr=\(encoded)&dirflg=d") {
+						UIApplication.shared.open(webUrl)
+					}
 				}
 			}
 		}
 	}
 
 	private func startVisit() {
-		// Update Firestore - the UI will update automatically via realtime listener
-		let db = Firestore.firestore()
-		db.collection("visits").document(visit.id).setData([
-			"status": "in_adventure",
-			"timeline.checkIn.timestamp": FieldValue.serverTimestamp(),
-			"startedAt": FieldValue.serverTimestamp()
-		], merge: true) { error in
-			if let error = error {
-				print("Error starting visit: \(error)")
-			} else {
-				print("Visit started successfully")
-			}
-		}
-        LocationService.shared.startVisitTracking()
-	}
-
-	private func completeVisit() {
-		showCompleteConfirm = false
+		// OPTIMISTICALLY SET ACTUAL START TIME IMMEDIATELY
+		// This ensures TIME LEFT countdown starts from full duration (e.g., 15:00)
+		let now = Date()
+		actualStartTimes[visit.id] = now
+		
+		// SYNC TICK IMMEDIATELY to prevent calculation mismatch
+		tick = now
+		
+		// ACTIVATE TIMER IMMEDIATELY for instant UI countdown
+		isTimerActive = true
+		
+		// Mark as pending write for visual feedback
+		pendingWrites.insert(visit.id)
+		
+		AppLogger.ui.info("Starting visit: \(visit.id) at \(Date())")
+		AppLogger.timer.info("Timer activated - isTimerActive = true")
+		AppLogger.ui.info("Optimistically set actualStartTime for immediate countdown")
 		
 		// Update Firestore - the UI will update automatically via realtime listener
 		let db = Firestore.firestore()
+		
+		// Use updateData with dot notation for proper nested field updates
+		db.collection("visits").document(visit.id).updateData([
+			"status": VisitStatus.inAdventure.rawValue,
+			"timeline.checkIn.timestamp": FieldValue.serverTimestamp(),
+			"startedAt": FieldValue.serverTimestamp()
+		]) { error in
+			// Remove from pending writes
+			pendingWrites.remove(visit.id)
+			
+			if let error = error {
+				AppLogger.ui.error("Error starting visit: \(error.localizedDescription)")
+				AppLogger.data.error("Error code: \((error as NSError).code), domain: \((error as NSError).domain)")
+				// DEACTIVATE TIMER on error
+				isTimerActive = false
+				// REMOVE OPTIMISTIC START TIME on error
+				actualStartTimes.removeValue(forKey: visit.id)
+				AppLogger.timer.info("Timer deactivated and actualStartTime removed due to error")
+				errorMessage = ErrorMapper.userFriendlyMessage(for: error)
+				showError = true
+			} else {
+				AppLogger.ui.info("Visit started successfully: \(visit.id)")
+				AppLogger.data.info("Wrote timeline.checkIn.timestamp to Firestore using updateData")
+				LocationService.shared.startVisitTracking()
+			}
+		}
+	}
+
+	private func undoStartVisit() {
+		showUndoConfirm = false
+		
+		// Store the current actual start time in case we need to restore it on error
+		let previousStartTime = actualStartTimes[visit.id]
+		let wasTimerActive = isTimerActive
+		
+		// DEACTIVATE TIMER IMMEDIATELY - THIS STOPS THE COUNTDOWN
+		isTimerActive = false
+		
+		// Optimistically remove actual start time IMMEDIATELY for instant UI update
+		// Force SwiftUI to detect the change by reassigning the entire dictionary
+		var updatedTimes = actualStartTimes
+		updatedTimes.removeValue(forKey: visit.id)
+		actualStartTimes = updatedTimes
+		
+		// Reset tick to current time
+		tick = Date()
+		
+		// Reset warning flag immediately
+		fiveMinuteWarningSent = false
+		
+		// Mark as pending write for visual feedback
+		pendingWrites.insert(visit.id)
+		
+		AppLogger.ui.info("Undoing visit start: \(visit.id) at \(Date())")
+		AppLogger.timer.info("Timer deactivated - isTimerActive = false")
+		AppLogger.ui.info("Removed actualStartTime, isVisitStarted should now be false")
+		
+		// Update Firestore - reset to scheduled status and remove timeline
+		let db = Firestore.firestore()
+		db.collection("visits").document(visit.id).updateData([
+			"status": VisitStatus.scheduled.rawValue,
+			"timeline.checkIn": FieldValue.delete(),
+			"startedAt": FieldValue.delete()
+		]) { error in
+			// Remove from pending writes
+			pendingWrites.remove(visit.id)
+			
+			if let error = error {
+				AppLogger.ui.error("Error undoing visit start: \(error.localizedDescription)")
+				// Restore the actual start time and timer state since the undo failed
+				if let previousTime = previousStartTime {
+					var restoredTimes = actualStartTimes
+					restoredTimes[visit.id] = previousTime
+					actualStartTimes = restoredTimes
+				}
+				isTimerActive = wasTimerActive
+				AppLogger.ui.info("Restored timer state due to error")
+				errorMessage = ErrorMapper.userFriendlyMessage(for: error)
+				showError = true
+			} else {
+				AppLogger.ui.info("Visit timer reset successfully: \(visit.id)")
+				// Stop location tracking since visit is no longer in progress
+				LocationService.shared.stopVisitTracking()
+			}
+		}
+	}
+	
+	private func completeVisit() {
+		showCompleteConfirm = false
+		
+		// DEACTIVATE TIMER since visit is being completed
+		isTimerActive = false
+		
+		// Mark as pending write for visual feedback
+		pendingWrites.insert(visit.id)
+		
+		AppLogger.timer.info("Completing visit: \(visit.id) at \(Date())")
+		AppLogger.timer.info("Timer deactivated - visit completed")
+		
+		// Update Firestore - the UI will update automatically via realtime listener
+		let db = Firestore.firestore()
+		
+		// Build update dictionary
 		var update: [String: Any] = [
-			"status": "completed",
+			"status": VisitStatus.completed.rawValue,
 			"timeline.checkOut.timestamp": FieldValue.serverTimestamp()
 		]
+		
 		if !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
 			update["pendingMessage"] = [
 				"text": draftText,
@@ -1284,16 +1823,23 @@ private struct VisitCard: View {
 				"createdAt": FieldValue.serverTimestamp()
 			]
 		}
-		db.collection("visits").document(visit.id).setData(update, merge: true) { error in
+		
+		// Use updateData with dot notation for proper nested field updates
+		db.collection("visits").document(visit.id).updateData(update) { error in
+			// Remove from pending writes
+			pendingWrites.remove(visit.id)
+			
 			if let error = error {
-				print("Error completing visit: \(error)")
+				AppLogger.ui.error("Error completing visit: \(error.localizedDescription)")
+				AppLogger.data.error("Error code: \((error as NSError).code), domain: \((error as NSError).domain)")
+				errorMessage = ErrorMapper.userFriendlyMessage(for: error)
+				showError = true
 			} else {
-				print("Visit completed successfully")
+				AppLogger.ui.info("Visit completed successfully: \(visit.id)")
+				AppLogger.data.info("Wrote timeline.checkOut.timestamp to Firestore using updateData")
+				LocationService.shared.stopVisitTracking()
 			}
 		}
-        LocationService.shared.stopVisitTracking()
-        // Also mark related booking as completed if it exists and matches by some external link (out of scope: mapping id). Placeholder for demonstration.
-        // try? await serviceBookings.completeBooking(bookingId: <bookingId>)
 	}
 }
 
@@ -1391,23 +1937,17 @@ private struct ActiveHoursCard: View {
     @State private var isExpanded: Bool = false
     
     private var formattedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .full
-        return formatter.string(from: dailyHours.date)
+        return DateFormatters.shared.fullDateFormatter.string(from: dailyHours.date)
     }
     
     private var formattedStartTime: String {
         guard let startTime = dailyHours.firstVisitStart else { return "N/A" }
-        let formatter = DateFormatter()
-        formatter.timeStyle = .short
-        return formatter.string(from: startTime)
+        return DateFormatters.shared.shortTimeFormatter.string(from: startTime)
     }
     
     private var formattedEndTime: String {
         guard let endTime = dailyHours.lastVisitEnd else { return "N/A" }
-        let formatter = DateFormatter()
-        formatter.timeStyle = .short
-        return formatter.string(from: endTime)
+        return DateFormatters.shared.shortTimeFormatter.string(from: endTime)
     }
     
     private var formattedHours: String {
@@ -1536,183 +2076,7 @@ private struct ActiveHoursCard: View {
     }
 }
 
-// MARK: - New Message View
-private struct NewMessageView: View {
-    @EnvironmentObject var chat: ChatService
-    @Environment(\.dismiss) private var dismiss
-    let selectedClientName: String?
-    
-    @State private var messageText: String = ""
-    @State private var isSending: Bool = false
-    @State private var showSuccessAlert: Bool = false
-    
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 20) {
-                // Header
-                VStack(spacing: 8) {
-                    Text("Send Message")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                    
-                    if let clientName = selectedClientName {
-                        Text("To: \(clientName)")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    Text("Your message will be reviewed by an admin before delivery.")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                }
-                .padding(.top)
-                
-                // Message input
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Message")
-                        .font(.headline)
-                    
-                    TextEditor(text: $messageText)
-                        .frame(minHeight: 120)
-                        .padding(8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                        )
-                        .overlay(
-                            Group {
-                                if messageText.isEmpty {
-                                    Text("Type your message here...")
-                                        .foregroundColor(.gray)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 8)
-                                        .allowsHitTesting(false)
-                                }
-                            },
-                            alignment: .topLeading
-                        )
-                }
-                .padding(.horizontal)
-                
-                Spacer()
-                
-                // Send button
-                Button(action: sendMessage) {
-                    HStack {
-                        if isSending {
-                            ProgressView()
-                                .scaleEffect(0.8)
-                                .foregroundColor(.white)
-                        } else {
-                            Image(systemName: "paperplane.fill")
-                        }
-                        Text(isSending ? "Sending..." : "Send Message")
-                    }
-                    .font(.headline)
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.gray : Color.blue)
-                    )
-                }
-                .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
-                .padding(.horizontal)
-                .padding(.bottom)
-            }
-            .navigationTitle("New Message")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                }
-            }
-            .alert("Message Sent", isPresented: $showSuccessAlert) {
-                Button("OK") {
-                    dismiss()
-                }
-            } message: {
-                Text("Your message has been sent for admin review. You'll be notified once it's approved.")
-            }
-        }
-    }
-    
-    private func sendMessage() {
-        guard !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        
-        isSending = true
-        
-        Task {
-            do {
-                let currentUser = Auth.auth().currentUser
-                let db = Firestore.firestore()
-                
-                // Find admin user ID
-                let adminQuery = try await db.collection("users")
-                    .whereField("role", isEqualTo: "admin")
-                    .limit(to: 1)
-                    .getDocuments()
-                
-                guard let adminDoc = adminQuery.documents.first else {
-                    throw NSError(domain: "ChatError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Admin user not found"])
-                }
-                
-                let adminId = adminDoc.documentID
-                let sitterId = currentUser?.uid ?? ""
-                
-                // Create conversation ID that includes admin and sitter
-                let conversationId = "sitter_\(sitterId)_admin_\(adminId)_client_\(selectedClientName ?? "")"
-                
-                // Create or get conversation with admin and sitter as participants
-                let conversationRef = db.collection("conversations").document(conversationId)
-                let conversationDoc = try await conversationRef.getDocument()
-                
-                if !conversationDoc.exists {
-                    try await conversationRef.setData([
-                        "participants": [sitterId, adminId],
-                        "participantRoles": [UserRole.petSitter.rawValue, UserRole.admin.rawValue],
-                        "type": ConversationType.sitterToClient.rawValue,
-                        "status": "active",
-                        "createdAt": FieldValue.serverTimestamp(),
-                        "lastMessage": "",
-                        "lastMessageAt": FieldValue.serverTimestamp(),
-                        "isPinned": false,
-                        "autoResponderSent": false,
-                        "adminReplied": false,
-                        "autoResponseHistory": [:],
-                        "autoResponseCooldown": 86400,
-                        "unreadCounts": [:],
-                        "lastReadTimestamps": [:]
-                    ])
-                }
-                
-                // Send message with admin moderation so it appears in admin's approval queue
-                try await ResilientChatService.shared.sendMessage(
-                    conversationId: conversationId,
-                    text: messageText,
-                    moderationType: .admin
-                )
-                
-                await MainActor.run {
-                    isSending = false
-                    showSuccessAlert = true
-                    messageText = ""
-                }
-            } catch {
-                print("Error sending message: \(error.localizedDescription)")
-                await MainActor.run {
-                    isSending = false
-                    // You might want to show an error alert here
-                }
-            }
-        }
-    }
-}
+// Modern NewMessageView is now in ModernChatView.swift
 
 // MARK: - Notifications View
 private struct NotificationsView: View {

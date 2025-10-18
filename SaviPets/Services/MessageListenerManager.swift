@@ -340,7 +340,7 @@ final class MessageListenerManager: ObservableObject {
         subscriberCounts.removeAll()
         
         // Also remove name listeners
-        for (nameListenerKey, listener) in nameListeners {
+        for (_, listener) in nameListeners {  // Swift 6: unused value fix
             listener.remove()
         }
         nameListeners.removeAll()

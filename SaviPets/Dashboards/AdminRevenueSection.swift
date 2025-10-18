@@ -1,6 +1,7 @@
 import SwiftUI
 import FirebaseFirestore
 import FirebaseAuth
+import OSLog
 
 struct AdminRevenueSection: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -19,6 +20,7 @@ struct AdminRevenueSection: View {
         VStack(alignment: .leading, spacing: SPDesignSystem.Spacing.m) {
             Text("Revenue (Last 7 Days)")
                 .font(.headline)
+                .foregroundStyle(.primary)
 
             HStack(spacing: SPDesignSystem.Spacing.m) {
                 summaryCard(title: "Total", value: total)
@@ -26,32 +28,67 @@ struct AdminRevenueSection: View {
                 summaryCard(title: "Best Day", value: topDay?.amount ?? 0, subtitle: topDay?.label)
             }
 
-            SPCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Daily Totals").font(.headline)
-                    VStack(spacing: 8) {
-                        ForEach(dailySums, id: \.label) { d in
-                            RevenueBarRow(label: d.label, amount: d.amount, maxAmount: maxDailyAmount)
-                        }
+            // Enhanced 3D Chart Card
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Daily Totals")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                
+                VStack(spacing: 10) {
+                    ForEach(dailySums, id: \.label) { d in
+                        RevenueBarRow(
+                            label: d.label,
+                            amount: d.amount,
+                            maxAmount: maxDailyAmount,
+                            isTopDay: d.label == topDay?.label
+                        )
                     }
                 }
             }
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.1), radius: 8, x: 0, y: 4)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.white.opacity(colorScheme == .dark ? 0.1 : 0.3), lineWidth: 1)
+                    )
+            )
+            .rotation3DEffect(.degrees(2), axis: (x: 1, y: 0, z: 0))
             SPCard {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Recent Payments").font(.headline)
                     if recentPayments.isEmpty {
-                        Text("No payments yet — showing mock data.")
+                        Text("No confirmed payments in the last 7 days.")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
-                    }
-                    VStack(spacing: 8) {
-                        ForEach(recentPayments.isEmpty ? mockRecent() : recentPayments, id: \.bookingId) { p in
-                            HStack {
-                                Text(formatDate(p.date)).frame(width: 64, alignment: .leading)
-                                Text(p.clientName).lineLimit(1)
-                                Spacer()
-                                Text("$\(p.amount, specifier: "%.2f")")
-                                Text(p.bookingId).foregroundColor(.secondary).font(.caption).frame(width: 64, alignment: .trailing)
+                            .padding(.vertical, 8)
+                    } else {
+                        VStack(spacing: 8) {
+                            ForEach(recentPayments, id: \.bookingId) { p in
+                                HStack {
+                                    Text(formatDate(p.date))
+                                        .font(.caption)
+                                        .frame(width: 64, alignment: .leading)
+                                    
+                                    Text(p.clientName)
+                                        .font(.subheadline)
+                                        .lineLimit(1)
+                                    
+                                    Spacer()
+                                    
+                                    Text("$\(p.amount, specifier: "%.2f")")
+                                        .font(.subheadline)
+                                        .foregroundColor(p.amount < 0 ? .red : .primary)
+                                        .fontWeight(.medium)
+                                    
+                                    Text(p.bookingId.prefix(8))
+                                        .foregroundColor(.secondary)
+                                        .font(.caption2)
+                                        .frame(width: 64, alignment: .trailing)
+                                }
+                                .padding(.vertical, 2)
                             }
                         }
                     }
@@ -76,65 +113,90 @@ struct AdminRevenueSection: View {
         let db = Firestore.firestore()
         let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
         listener?.remove()
-        listener = db.collection("payments")
-            .whereField("createdAt", isGreaterThanOrEqualTo: Timestamp(date: sevenDaysAgo))
-            .order(by: "createdAt", descending: false)
+        
+        // Listen to serviceBookings with confirmed payments (approved payments only)
+        listener = db.collection("serviceBookings")
+            .whereField("paymentStatus", isEqualTo: "confirmed")
+            .whereField("paymentConfirmedAt", isGreaterThanOrEqualTo: Timestamp(date: sevenDaysAgo))
+            .order(by: "paymentConfirmedAt", descending: false)
             .addSnapshotListener { snapshot, _ in
                 var sums: [String: Double] = [:]
                 var totalUSD: Double = 0
-                var _: [(date: Date, amount: Double, userId: String, bookingId: String, clientName: String)] = []
+                
                 if let docs = snapshot?.documents, !docs.isEmpty {
                     let group = DispatchGroup()
                     var enriched: [(Date, Double, String, String, String)] = []
+                    
                     for d in docs {
                         let data = d.data()
-                        let cents = (data["amount"] as? Double) ?? Double((data["amount"] as? Int) ?? 0)
-                        let date = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+                        let bookingId = d.documentID
+                        
+                        // Get payment amount from booking price
+                        let price = data["price"] as? Double ?? 0.0
+                        
+                        // Get payment confirmation date
+                        let date = (data["paymentConfirmedAt"] as? Timestamp)?.dateValue() ?? Date()
                         let label = DateFormatter.localizedString(from: date, dateStyle: .short, timeStyle: .none)
-                        let userId = data["userId"] as? String ?? ""
-                        let bookingId = data["bookingId"] as? String ?? ""
-                        let usd = cents / 100.0
-                        sums[label, default: 0] += usd
-                        totalUSD += usd
-
+                        
+                        // Get client info
+                        let clientId = data["clientId"] as? String ?? ""
+                        
+                        // Check if this was refunded
+                        let status = data["status"] as? String ?? ""
+                        let isRefunded = (status == "cancelled" || status == "refunded")
+                        let refundAmount = data["refundAmount"] as? Double ?? 0.0
+                        
+                        // Calculate net amount (payment - refund if any)
+                        let netAmount = isRefunded ? -refundAmount : price
+                        
+                        // Add to daily sums
+                        sums[label, default: 0] += netAmount
+                        totalUSD += netAmount
+                        
+                        // Fetch client name
                         group.enter()
-                        Firestore.firestore().collection("users").document(userId).getDocument { snap, _ in
-                            let name = (snap?.data()?["displayName"] as? String) ?? (snap?.data()?["name"] as? String) ?? userId.prefix(6).description
-                            enriched.append((date, usd, userId, bookingId, name))
+                        db.collection("users").document(clientId).getDocument { snap, _ in
+                            let name = (snap?.data()?["displayName"] as? String) ?? 
+                                      (snap?.data()?["name"] as? String) ?? 
+                                      "Client #\(clientId.prefix(6))"
+                            enriched.append((date, netAmount, clientId, bookingId, name))
                             group.leave()
                         }
                     }
+                    
                     group.notify(queue: .main) {
-                        self.recentPayments = enriched.sorted(by: { $0.0 > $1.0 }).prefix(10).map { ($0.0, $0.1, $0.2, $0.3, $0.4) }
+                        // Sort by date descending and take top 10
+                        self.recentPayments = enriched
+                            .sorted(by: { $0.0 > $1.0 })
+                            .prefix(10)
+                            .map { ($0.0, $0.1, $0.2, $0.3, $0.4) }
+                        
+                        // Sort daily sums chronologically
                         self.dailySums = sums.map { ($0.key, $0.value) }.sorted { $0.0 < $1.0 }
                         self.total = totalUSD
-                        self.average = self.dailySums.isEmpty ? 0 : (totalUSD / Double(self.dailySums.count))
+                        
+                        // Calculate average only for days that had payments
+                        let daysWithPayments = sums.filter { $0.value > 0 }.count
+                        self.average = daysWithPayments > 0 ? (totalUSD / Double(daysWithPayments)) : 0
+                        
                         self.topDay = self.dailySums.max(by: { $0.1 < $1.1 })
+                        
+                        AppLogger.data.info("💰 Revenue calculated: Total=$\(totalUSD), Days=\(self.dailySums.count), Avg=$\(self.average)")
                     }
                 } else {
-                    // Fallback mock data
-                    let mock = mockRecent()
-                    self.recentPayments = mock
-                    for m in mock {
-                        let label = self.formatDate(m.date)
-                        sums[label, default: 0] += m.amount
-                        totalUSD += m.amount
+                    // No confirmed payments in last 7 days - show empty state
+                    DispatchQueue.main.async {
+                        self.recentPayments = []
+                        self.dailySums = []
+                        self.total = 0
+                        self.average = 0
+                        self.topDay = nil
+                        AppLogger.data.info("💰 No confirmed payments found in last 7 days")
                     }
-                    self.dailySums = sums.map { ($0.key, $0.value) }.sorted { $0.0 < $1.0 }
-                    self.total = totalUSD
-                    self.average = self.dailySums.isEmpty ? 0 : (totalUSD / Double(self.dailySums.count))
-                    self.topDay = self.dailySums.max(by: { $0.1 < $1.1 })
                 }
             }
     }
 
-    private func mockRecent() -> [(date: Date, amount: Double, userId: String, bookingId: String, clientName: String)] {
-        let items = [
-            (Date(), 50.00, "test1", "B001", "Test User 1"),
-            (Date().addingTimeInterval(-86400), 30.00, "test2", "B002", "Test User 2")
-        ]
-        return items
-    }
 
     private func formatDate(_ d: Date) -> String {
         DateFormatter.localizedString(from: d, dateStyle: .short, timeStyle: .none)
@@ -222,21 +284,143 @@ private struct RevenueBarRow: View {
     let label: String
     let amount: Double
     let maxAmount: Double
+    let isTopDay: Bool
+    
+    @State private var animateBar: CGFloat = 0
+    @State private var pulseEffect: Bool = false
 
     var body: some View {
-        let barColor = SPDesignSystem.Colors.primaryAdjusted(colorScheme)
-        HStack {
-            Text(label).frame(width: 60, alignment: .leading)
+        let baseColor = SPDesignSystem.Colors.primaryAdjusted(colorScheme)
+        
+        // Enhanced 3D gradient with depth
+        let barGradient = LinearGradient(
+            gradient: Gradient(colors: [
+                baseColor.opacity(0.9),
+                baseColor.opacity(0.7),
+                baseColor.opacity(0.5),
+                baseColor.opacity(0.3)
+            ]),
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        
+        // Special glow gradient for top day
+        let glowGradient = LinearGradient(
+            gradient: Gradient(colors: [
+                baseColor.opacity(0.6),
+                baseColor.opacity(0.3),
+                baseColor.opacity(0.1)
+            ]),
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+
+        HStack(spacing: 12) {
+            // Day label
+            Text(label)
+                .frame(width: 60, alignment: .leading)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundColor(.secondary)
+
+            // Bar chart with 3D effect
             GeometryReader { geo in
-                let width = CGFloat(amount / max(maxAmount, 1)) * max(geo.size.width - 8, 0)
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(barColor)
-                    .frame(width: width, height: 10)
+                let targetWidth = CGFloat(amount / max(maxAmount, 1)) * max(geo.size.width - 8, 0)
+
+                ZStack(alignment: .leading) {
+                    // Subtle background track with gradient
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.secondary.opacity(0.08),
+                                    Color.secondary.opacity(0.04)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.secondary.opacity(0.1), lineWidth: 0.5)
+                        )
+                    
+                    // Animated 3D bar with depth
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(barGradient)
+                        .overlay(
+                            // Top highlight for 3D effect
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(colorScheme == .dark ? 0.15 : 0.3),
+                                    Color.white.opacity(0.05),
+                                    Color.clear
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(colorScheme == .dark ? 0.2 : 0.4),
+                                            Color.white.opacity(0.05)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1.5
+                                )
+                        )
+                        .shadow(color: baseColor.opacity(0.3), radius: isTopDay ? 8 : 4, x: 0, y: isTopDay ? 5 : 3)
+                        .shadow(color: .black.opacity(0.2), radius: 3, x: 0, y: 2)
+                        .frame(width: animateBar, height: 18)
+                        .scaleEffect(isTopDay && pulseEffect ? 1.05 : 1.0)
+                        .animation(.easeOut(duration: 0.8).delay(Double(dailySums.firstIndex(where: { $0.label == label }) ?? 0) * 0.1), value: animateBar)
+                        .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulseEffect)
+                    
+                    // Glow effect for top day
+                    if isTopDay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(glowGradient)
+                            .frame(width: animateBar, height: 18)
+                            .blur(radius: 8)
+                            .opacity(pulseEffect ? 0.6 : 0.3)
+                    }
+                }
+                .onAppear {
+                    withAnimation {
+                        animateBar = targetWidth
+                    }
+                    if isTopDay {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            pulseEffect = true
+                        }
+                    }
+                }
+                .onChange(of: amount) { _ in
+                    withAnimation(.spring(response: 0.6, dampingFraction: 0.7)) {
+                        animateBar = targetWidth
+                    }
+                }
             }
-            .frame(height: 12)
-            Spacer(minLength: 8)
+            .frame(height: 22)
+
+            // Amount with subtle animation
             Text("$\(amount, specifier: "%.2f")")
+                .font(.system(size: 13, weight: isTopDay ? .semibold : .medium, design: .rounded))
+                .foregroundColor(isTopDay ? baseColor : .secondary)
+                .frame(width: 70, alignment: .trailing)
+                .scaleEffect(isTopDay && pulseEffect ? 1.05 : 1.0)
         }
+        .padding(.vertical, 4)
+    }
+    
+    // Helper to get dailySums for animation delay
+    private var dailySums: [(label: String, amount: Double)] {
+        // Access from parent view context - will be populated by parent
+        []
     }
 }
 

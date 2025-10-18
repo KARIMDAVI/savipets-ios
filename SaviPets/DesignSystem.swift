@@ -18,6 +18,13 @@ enum SPDesignSystem {
         static let white = Color.white
         static let success = Color(hex: "#34C759")
         static let error = Color(hex: "#FF3B30")
+        
+        // Chat-specific colors (Smartsupp-inspired with SaviPets yellow theme)
+        static let chatYellow = Color(hex: "#FFD54F")       // Primary yellow for outgoing messages
+        static let chatYellowLight = Color(hex: "#FFF9E6")  // Light yellow for backgrounds
+        static let chatTextDark = Color(hex: "#333333")     // Dark text
+        static let chatBubbleIncoming = Color.white         // Incoming message background
+        static let chatBubbleBorder = Color(hex: "#E0E0E0") // Border for incoming messages
 
         // Balanced surfaces for light/dark
         static func surface(_ scheme: ColorScheme) -> Color {
@@ -129,13 +136,39 @@ struct GlassBackground: ViewModifier {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(SPDesignSystem.Colors.glassBorder, lineWidth: 1)
             )
-            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.3 : 0.08), radius: 15, x: 0, y: 8)
+            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.4 : 0.15), radius: 20, x: 0, y: 10)
+            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.2 : 0.08), radius: 8, x: 0, y: 4)
+            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.1 : 0.05), radius: 3, x: 0, y: 1)
     }
 }
 
 extension View {
     func glass() -> some View { modifier(GlassBackground()) }
     func glassCardStyle() -> some View { modifier(GlassBackground()) }
+    func threeDButtonStyle() -> some View { modifier(ThreeDButtonModifier()) }
+}
+
+// MARK: - 3D Button Modifier
+struct ThreeDButtonModifier: ViewModifier {
+    @State private var isPressed = false
+    
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(isPressed ? 0.95 : 1.0)
+            .shadow(color: .black.opacity(isPressed ? 0.1 : 0.2), radius: isPressed ? 8 : 15, x: 0, y: isPressed ? 4 : 8)
+            .shadow(color: .black.opacity(isPressed ? 0.05 : 0.1), radius: isPressed ? 4 : 8, x: 0, y: isPressed ? 2 : 4)
+            .animation(.easeInOut(duration: 0.1), value: isPressed)
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.1)) {
+                    isPressed = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    withAnimation(.easeInOut(duration: 0.1)) {
+                        isPressed = false
+                    }
+                }
+            }
+    }
 }
 
 // MARK: - Buttons
@@ -152,8 +185,10 @@ struct PrimaryButtonStyle: ButtonStyle {
             .background(SPDesignSystem.Colors.goldenGradient(colorScheme))
             .foregroundColor(SPDesignSystem.Colors.dark)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1)
             .opacity(configuration.isPressed ? 0.9 : 1)
+            .shadow(color: .black.opacity(configuration.isPressed ? 0.1 : 0.2), radius: configuration.isPressed ? 8 : 15, x: 0, y: configuration.isPressed ? 4 : 8)
+            .shadow(color: .black.opacity(configuration.isPressed ? 0.05 : 0.1), radius: configuration.isPressed ? 4 : 8, x: 0, y: configuration.isPressed ? 2 : 4)
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
@@ -177,8 +212,10 @@ struct PrimaryButtonStyleBrightInLight: ButtonStyle {
             .background(bg)
             .foregroundColor(SPDesignSystem.Colors.dark)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1)
             .opacity(configuration.isPressed ? 0.9 : 1)
+            .shadow(color: .black.opacity(configuration.isPressed ? 0.1 : 0.2), radius: configuration.isPressed ? 8 : 15, x: 0, y: configuration.isPressed ? 4 : 8)
+            .shadow(color: .black.opacity(configuration.isPressed ? 0.05 : 0.1), radius: configuration.isPressed ? 4 : 8, x: 0, y: configuration.isPressed ? 2 : 4)
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
@@ -192,8 +229,10 @@ struct SecondaryButtonStyle: ButtonStyle {
             .background(SPDesignSystem.Colors.secondary)
             .foregroundColor(SPDesignSystem.Colors.dark)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1)
             .opacity(configuration.isPressed ? 0.9 : 1)
+            .shadow(color: .black.opacity(configuration.isPressed ? 0.1 : 0.2), radius: configuration.isPressed ? 8 : 15, x: 0, y: configuration.isPressed ? 4 : 8)
+            .shadow(color: .black.opacity(configuration.isPressed ? 0.05 : 0.1), radius: configuration.isPressed ? 4 : 8, x: 0, y: configuration.isPressed ? 2 : 4)
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
@@ -207,8 +246,10 @@ struct DarkButtonStyle: ButtonStyle {
             .background(SPDesignSystem.Colors.dark)
             .foregroundColor(.white)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1)
             .opacity(configuration.isPressed ? 0.9 : 1)
+            .shadow(color: .black.opacity(configuration.isPressed ? 0.1 : 0.2), radius: configuration.isPressed ? 8 : 15, x: 0, y: configuration.isPressed ? 4 : 8)
+            .shadow(color: .black.opacity(configuration.isPressed ? 0.05 : 0.1), radius: configuration.isPressed ? 4 : 8, x: 0, y: configuration.isPressed ? 2 : 4)
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
@@ -226,8 +267,9 @@ struct GhostButtonStyle: ButtonStyle {
                     .stroke(colorScheme == .dark ? Color.white.opacity(0.4) : SPDesignSystem.Colors.dark.opacity(0.25), lineWidth: 1)
             )
             .foregroundColor(colorScheme == .dark ? .white : SPDesignSystem.Colors.dark)
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1)
             .opacity(configuration.isPressed ? 0.7 : 1)
+            .shadow(color: .black.opacity(configuration.isPressed ? 0.05 : 0.1), radius: configuration.isPressed ? 4 : 8, x: 0, y: configuration.isPressed ? 2 : 4)
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }

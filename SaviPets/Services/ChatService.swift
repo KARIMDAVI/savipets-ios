@@ -2,6 +2,7 @@ import Foundation
 import FirebaseFirestore
 import FirebaseAuth
 import Combine
+import OSLog
 
 // MARK: - Legacy ChatService (Deprecated - Use UnifiedChatService)
 // This class is kept for backward compatibility but delegates to UnifiedChatService
@@ -37,6 +38,14 @@ final class ChatService: ObservableObject {
     }
     
     private var cancellables = Set<AnyCancellable>()
+    
+    // MARK: - Cleanup
+    deinit {
+        // Leak fix: Cancel all Combine subscriptions
+        cancellables.forEach { $0.cancel() }
+        cancellables.removeAll()
+        AppLogger.chat.debug("ChatService deallocated, cancellables cleaned up")
+    }
 
     // MARK: - Inquiries (Delegated)
 
@@ -105,12 +114,16 @@ final class ChatService: ObservableObject {
     }
     
     func setCurrentUserRole(_ role: UserRole) {
-        print("🔵 ChatService: Setting user role to: \(role.rawValue)")
+        AppLogger.chat.info("Setting user role to: \(role.rawValue)")
         unifiedService.setCurrentUserRole(role)
     }
     
     func cleanupDuplicateConversations() async throws {
         try await unifiedService.cleanupAllDuplicateConversations()
+    }
+    
+    func deleteConversation(_ conversationId: String) async throws {
+        try await unifiedService.deleteConversation(conversationId)
     }
 }
 

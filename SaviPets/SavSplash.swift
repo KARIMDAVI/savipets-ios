@@ -13,12 +13,12 @@ struct PlayerLayerView: UIViewRepresentable {
             ?? Bundle.main.url(forResource: "SavSpalsh", withExtension: "mp4")
             ?? Bundle.main.url(forResource: "SavSplash", withExtension: "mp4")
 
-        if let url {
+        if let url, let playerLayer = v.playerLayer {
             let player = AVPlayer(url: url)
             player.isMuted = true
             player.automaticallyWaitsToMinimizeStalling = false
-            v.playerLayer.player = player
-            v.playerLayer.videoGravity = .resizeAspectFill
+            playerLayer.player = player
+            playerLayer.videoGravity = .resizeAspectFill
 
             let observer = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: player.currentItem, queue: .main) { _ in
                 player.seek(to: .zero)
@@ -34,20 +34,20 @@ struct PlayerLayerView: UIViewRepresentable {
 
     class PlayerContainerView: UIView {
         override static var layerClass: AnyClass { AVPlayerLayer.self }
-        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+        var playerLayer: AVPlayerLayer? { layer as? AVPlayerLayer }
         private var observer: NSObjectProtocol?
         
         override func layoutSubviews() {
             super.layoutSubviews()
-            playerLayer.frame = bounds
+            playerLayer?.frame = bounds
         }
         
         deinit {
             if let observer = observer {
                 NotificationCenter.default.removeObserver(observer)
             }
-            playerLayer.player?.pause()
-            playerLayer.player = nil
+            playerLayer?.player?.pause()
+            playerLayer?.player = nil
         }
         
         func setObserver(_ observer: NSObjectProtocol?) {

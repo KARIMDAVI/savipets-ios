@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import UserNotifications
 import FirebaseMessaging
 import FirebaseAuth
@@ -6,19 +7,30 @@ import Combine
 import UIKit
 
 /// Smart notification manager that batches notifications to prevent spam
+@MainActor
 final class SmartNotificationManager: ObservableObject {
     
     // MARK: - Singleton
     static let shared = SmartNotificationManager()
     
+    // MARK: - ChatNotification Model
+    struct ChatNotification {
+        let conversationId: String
+        let messageId: String
+        let senderName: String
+        let messageText: String
+        let isAdmin: Bool
+        let timestamp: Date = Date()
+    }
+    
     // MARK: - Published Properties
     @Published var isNotificationEnabled: Bool = false
-    @Published var pendingNotifications: [String: [ChatNotification]] = [:]
+    @Published private(set) var pendingNotifications: [String: [ChatNotification]] = [:]
     
     // MARK: - Private Properties
     private let batchDelay: TimeInterval = 3.0
     private let maxBatchSize = 5
-    private var batchTimers: [String: Timer] = [:]
+    private var batchTasks: [String: Task<Void, Never>] = [:] // Use Task instead of Timer
     private var lastNotificationTimes: [String: Date] = [:]
     private let minimumIntervalBetweenNotifications: TimeInterval = 2.0
     
@@ -28,9 +40,18 @@ final class SmartNotificationManager: ObservableObject {
     private let systemNotificationCategory = "SYSTEM_MESSAGE"
     
     // MARK: - Singleton
-    private init() {
-        setupNotificationCategories()
-        checkNotificationPermission()
+    nonisolated private init() {
+        Task { @MainActor in
+            setupNotificationCategories()
+            checkNotificationPermission()
+        }
+    }
+    
+    deinit {
+        // Cancel all pending batch tasks
+        for task in batchTasks.values {
+            task.cancel()
+        }
     }
     
     // MARK: - Public Methods
@@ -50,14 +71,14 @@ final class SmartNotificationManager: ObservableObject {
                 await MainActor.run {
                     UIApplication.shared.registerForRemoteNotifications()
                 }
-                print("SmartNotificationManager: Notification permission granted")
+                AppLogger.notification.info("Notification permission granted")
             } else {
-                print("SmartNotificationManager: Notification permission denied")
+                AppLogger.notification.info("Notification permission denied")
             }
             
             return granted
         } catch {
-            print("SmartNotificationManager: Error requesting notification permission: \(error)")
+            AppLogger.notification.info("Error requesting notification permission: \(error)")
             return false
         }
     }
@@ -72,13 +93,13 @@ final class SmartNotificationManager: ObservableObject {
     ) {
         // Check if notifications are enabled
         guard isNotificationEnabled else {
-            print("SmartNotificationManager: Notifications disabled, skipping")
+            AppLogger.notification.info("Notifications disabled, skipping")
             return
         }
         
         // Check rate limiting
         guard shouldSendNotification(for: conversationId) else {
-            print("SmartNotificationManager: Rate limited, skipping notification")
+            AppLogger.notification.info("Rate limited, skipping notification")
             return
         }
         
@@ -93,20 +114,22 @@ final class SmartNotificationManager: ObservableObject {
         // Add to pending notifications
         pendingNotifications[conversationId, default: []].append(notification)
         
-        // Cancel existing timer if any
-        batchTimers[conversationId]?.invalidate()
+        // Cancel existing task if any
+        batchTasks[conversationId]?.cancel()
         
-        // Schedule batched notification
-        let timer = Timer.scheduledTimer(withTimeInterval: batchDelay, repeats: false) { [weak self] _ in
-            Task {
-                await self?.sendBatchedNotification(for: conversationId)
+        // Schedule batched notification with Task
+        batchTasks[conversationId] = Task {
+            do {
+                try await Task.sleep(nanoseconds: UInt64(batchDelay * 1_000_000_000))
+                await sendBatchedNotification(for: conversationId)
+            } catch {
+                // Task was cancelled, which is normal
             }
         }
         
-        batchTimers[conversationId] = timer
         lastNotificationTimes[conversationId] = Date()
         
-        print("SmartNotificationManager: Scheduled notification for conversation \(conversationId)")
+        AppLogger.notification.info("Scheduled notification for conversation \(conversationId)")
     }
     
     /// Send immediate notification (for urgent messages)
@@ -133,9 +156,9 @@ final class SmartNotificationManager: ObservableObject {
         
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
-                print("SmartNotificationManager: Error sending immediate notification: \(error)")
+                AppLogger.notification.info("Error sending immediate notification: \(error)")
             } else {
-                print("SmartNotificationManager: Immediate notification sent successfully")
+                AppLogger.notification.info("Immediate notification sent successfully")
             }
         }
     }
@@ -180,9 +203,9 @@ final class SmartNotificationManager: ObservableObject {
         
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
-                print("SmartNotificationManager: Error sending approval notification: \(error)")
+                AppLogger.notification.info("Error sending approval notification: \(error)")
             } else {
-                print("SmartNotificationManager: Approval notification sent successfully")
+                AppLogger.notification.info("Approval notification sent successfully")
             }
         }
     }
@@ -206,34 +229,34 @@ final class SmartNotificationManager: ObservableObject {
         
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
-                print("SmartNotificationManager: Error sending auto-reply notification: \(error)")
+                AppLogger.notification.info("Error sending auto-reply notification: \(error)")
             } else {
-                print("SmartNotificationManager: Auto-reply notification sent successfully")
+                AppLogger.notification.info("Auto-reply notification sent successfully")
             }
         }
     }
     
     /// Clear all pending notifications
     func clearPendingNotifications() {
-        // Cancel all timers
-        for timer in batchTimers.values {
-            timer.invalidate()
+        // Cancel all tasks
+        for task in batchTasks.values {
+            task.cancel()
         }
-        batchTimers.removeAll()
+        batchTasks.removeAll()
         
         // Clear pending notifications
         pendingNotifications.removeAll()
         
-        print("SmartNotificationManager: Cleared all pending notifications")
+        AppLogger.notification.info("Cleared all pending notifications")
     }
     
     /// Clear notifications for a specific conversation
     func clearNotifications(for conversationId: String) {
-        batchTimers[conversationId]?.invalidate()
-        batchTimers.removeValue(forKey: conversationId)
+        batchTasks[conversationId]?.cancel()
+        batchTasks.removeValue(forKey: conversationId)
         pendingNotifications.removeValue(forKey: conversationId)
         
-        print("SmartNotificationManager: Cleared notifications for conversation \(conversationId)")
+        AppLogger.notification.info("Cleared notifications for conversation \(conversationId)")
     }
     
     // MARK: - Private Methods
@@ -260,7 +283,7 @@ final class SmartNotificationManager: ObservableObject {
             content.body = "\(notification.senderName): \(notification.messageText)"
         } else {
             // Multiple messages notification
-            guard let latestNotification = notifications.last else { return }
+            guard notifications.last != nil else { return }  // Swift 6: unused value fix
             let senderNames = Set(notifications.map { $0.senderName })
             
             if senderNames.count == 1 {
@@ -282,9 +305,9 @@ final class SmartNotificationManager: ObservableObject {
         
         do {
             try await UNUserNotificationCenter.current().add(request)
-            print("SmartNotificationManager: Sent batched notification for conversation \(conversationId)")
+            AppLogger.notification.info("Sent batched notification for conversation \(conversationId)")
         } catch {
-            print("SmartNotificationManager: Error sending batched notification: \(error)")
+            AppLogger.notification.info("Error sending batched notification: \(error)")
         }
     }
     
@@ -357,11 +380,116 @@ final class SmartNotificationManager: ObservableObject {
         }
     }
     
+    // MARK: - Visit Notifications
+    
+    /// Send notification when sitter starts a visit (to Admin and Pet Owner)
+    func sendVisitStartNotification(
+        visitId: String,
+        sitterName: String,
+        clientId: String,
+        clientName: String,
+        serviceSummary: String,
+        address: String?
+    ) {
+        guard isNotificationEnabled else { return }
+        
+        let title = "Visit Started"
+        let body = "\(sitterName) has started the visit with \(clientName) - \(serviceSummary)"
+        
+        sendImmediateNotification(
+            title: title,
+            body: body,
+            category: "VISIT_START",
+            userInfo: [
+                "visitId": visitId,
+                "type": "visit_start",
+                "clientId": clientId,
+                "sitterName": sitterName,
+                "address": address ?? ""
+            ]
+        )
+        
+        AppLogger.notification.info("📍 Visit start notification sent: \(visitId)")
+    }
+    
+    // MARK: - Booking Notifications
+    
+    /// Send notification when a pet owner books a service (to Admin)
+    func sendBookingCreatedNotification(
+        bookingId: String,
+        clientName: String,
+        clientId: String,
+        serviceType: String,
+        scheduledDate: Date,
+        scheduledTime: String,
+        pets: [String]
+    ) {
+        guard isNotificationEnabled else { return }
+        
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .medium
+        dateFormatter.timeStyle = .none
+        let dateStr = dateFormatter.string(from: scheduledDate)
+        
+        let petsStr = pets.joined(separator: ", ")
+        
+        let title = "New Booking"
+        let body = "\(clientName) booked \(serviceType) for \(dateStr) at \(scheduledTime) - Pets: \(petsStr)"
+        
+        sendImmediateNotification(
+            title: title,
+            body: body,
+            category: "BOOKING_CREATED",
+            userInfo: [
+                "bookingId": bookingId,
+                "type": "booking_created",
+                "clientId": clientId,
+                "serviceType": serviceType
+            ]
+        )
+        
+        AppLogger.notification.info("📝 Booking created notification sent: \(bookingId)")
+    }
+    
+    /// Send notification when a booking needs admin approval (to Admin)
+    func sendBookingNeedsApprovalNotification(
+        bookingId: String,
+        clientName: String,
+        clientId: String,
+        serviceType: String,
+        scheduledDate: Date,
+        scheduledTime: String
+    ) {
+        guard isNotificationEnabled else { return }
+        
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .medium
+        dateFormatter.timeStyle = .none
+        let dateStr = dateFormatter.string(from: scheduledDate)
+        
+        let title = "Booking Needs Approval"
+        let body = "\(clientName) needs approval for \(serviceType) on \(dateStr) at \(scheduledTime)"
+        
+        sendImmediateNotification(
+            title: title,
+            body: body,
+            category: "BOOKING_APPROVAL",
+            userInfo: [
+                "bookingId": bookingId,
+                "type": "booking_approval",
+                "clientId": clientId,
+                "serviceType": serviceType
+            ]
+        )
+        
+        AppLogger.notification.info("⏳ Booking approval notification sent: \(bookingId)")
+    }
+    
     // MARK: - Notification Analytics
     
     func getNotificationStats() -> NotificationStats {
         let totalPending = pendingNotifications.values.flatMap { $0 }.count
-        let activeBatches = batchTimers.count
+        let activeBatches = batchTasks.count
         
         return NotificationStats(
             totalPendingNotifications: totalPending,
@@ -416,7 +544,7 @@ extension SmartNotificationManager {
     
     private func handleQuickReply(conversationId: String, text: String) {
         // This would integrate with the chat service to send a quick reply
-        print("SmartNotificationManager: Quick reply to \(conversationId): \(text)")
+        AppLogger.notification.info("Quick reply to \(conversationId): \(text)")
         
         // Post notification to app to handle quick reply
         NotificationCenter.default.post(
@@ -431,7 +559,7 @@ extension SmartNotificationManager {
     
     private func markConversationAsRead(conversationId: String) {
         // This would integrate with the chat service to mark as read
-        print("SmartNotificationManager: Marking conversation \(conversationId) as read")
+        AppLogger.notification.info("Marking conversation \(conversationId) as read")
         
         // Post notification to app
         NotificationCenter.default.post(
@@ -443,7 +571,7 @@ extension SmartNotificationManager {
     
     private func navigateToConversation(conversationId: String) {
         // This would integrate with the app's navigation
-        print("SmartNotificationManager: Navigating to conversation \(conversationId)")
+        AppLogger.notification.info("Navigating to conversation \(conversationId)")
         
         // Post notification to app
         NotificationCenter.default.post(
@@ -472,19 +600,19 @@ extension SmartNotificationManager {
         
         do {
             let token = try await Messaging.messaging().token()
-            print("SmartNotificationManager: FCM Token: \(token)")
+            AppLogger.notification.info("FCM Token: \(token)")
             
             // Send token to server for targeted notifications
             await sendTokenToServer(token: token)
             
         } catch {
-            print("SmartNotificationManager: Error getting FCM token: \(error)")
+            AppLogger.notification.info("Error getting FCM token: \(error)")
         }
     }
     
     private func sendTokenToServer(token: String) async {
         // This would send the FCM token to your server for targeted push notifications
-        print("SmartNotificationManager: Sending FCM token to server: \(token)")
+        AppLogger.notification.info("Sending FCM token to server: \(token)")
         
         // Example implementation:
         // let url = URL(string: "https://your-server.com/api/fcm-tokens")!
@@ -496,12 +624,12 @@ extension SmartNotificationManager {
         // request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         // 
         // let (_, response) = try await URLSession.shared.data(for: request)
-        // print("SmartNotificationManager: Token sent to server: \(response)")
+        // AppLogger.notification.info("Token sent to server: \(response)")
     }
     
     /// Handle push notification
     func handlePushNotification(userInfo: [AnyHashable: Any]) {
-        print("SmartNotificationManager: Received push notification: \(userInfo)")
+        AppLogger.notification.info("Received push notification: \(userInfo)")
         
         // Handle different types of push notifications
         if let type = userInfo["type"] as? String {
@@ -519,5 +647,45 @@ extension SmartNotificationManager {
                 break
             }
         }
+    }
+    
+    /// Send notification to sitter when assigned to a visit
+    func sendVisitAssignmentNotification(
+        visitId: String,
+        clientName: String,
+        clientId: String,
+        serviceType: String,
+        scheduledDate: Date,
+        scheduledTime: String,
+        address: String,
+        pets: [String]
+    ) {
+        guard isNotificationEnabled else { return }
+        
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .medium
+        dateFormatter.timeStyle = .none
+        let dateStr = dateFormatter.string(from: scheduledDate)
+        
+        let petsStr = pets.joined(separator: ", ")
+        
+        let title = "New Visit Assignment"
+        let body = "You've been assigned to \(serviceType) for \(clientName) on \(dateStr) at \(scheduledTime) - Pets: \(petsStr)"
+        
+        sendImmediateNotification(
+            title: title,
+            body: body,
+            category: "VISIT_ASSIGNMENT",
+            userInfo: [
+                "visitId": visitId,
+                "type": "visit_assignment",
+                "clientId": clientId,
+                "clientName": clientName,
+                "serviceType": serviceType,
+                "address": address
+            ]
+        )
+        
+        AppLogger.notification.info("🎯 Visit assignment notification sent: \(visitId)")
     }
 }

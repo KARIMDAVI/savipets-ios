@@ -3,6 +3,7 @@ import SwiftUI
 struct ServiceCategoryCard: View {
     let title: String
     let imageName: String
+    
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             Image(imageName)
@@ -19,7 +20,13 @@ struct ServiceCategoryCard: View {
         }
         .frame(width: 220, height: 140)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 6)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.clear)
+                .shadow(color: .black.opacity(0.25), radius: 20, x: 0, y: 10)
+                .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+                .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 1)
+        )
     }
 }
 // MARK: OvernightCare
@@ -37,12 +44,26 @@ struct OvernightCareServicesView: View {
 // MARK: Dog Walks
 struct DogWalksServicesView: View {
     var body: some View {
-        List {
-            ServiceRow(name: "Potty Break", duration: "15 min", price: "$17.99", details: "A short visit tailored for essential care: fresh water, quick potty break or litter refresh, and a brief walk to stretch their legs.")
-            ServiceRow(name: "Quick Walk", duration: "30 min", price: "$24.99", details: "A half‑hour visit to refresh water, bring in packages, and provide a comfortable walk. During extreme heat or rain, we shorten outdoor time and focus on safe indoor engagement.")
-            ServiceRow(name: "Quality Time", duration: "60 min", price: "$39.99", details: "A full hour of attentive care. We ensure water/feeding as instructed, light home care (packages/mail), and meaningful enrichment time for a happier pet.")
-            ServiceRow(name: "Walk & Play", duration: "120 min", price: "$75.00", details: "Two hours of balanced exercise and enrichment. Includes an extended walk, playtime, hydration check, and tailored activities to match your pet’s energy level—ideal for high‑energy dogs or special days.")
+        ScrollView {
+            VStack(spacing: 16) {
+                ServiceRow(name: "Potty Break", duration: "15 min", price: "$17.99", details: "A short visit tailored for essential care: fresh water, quick potty break or litter refresh, and a brief walk to stretch their legs.")
+                ServiceRow(name: "Quick Walk", duration: "30 min", price: "$24.99", details: "A half‑hour visit to refresh water, bring in packages, and provide a comfortable walk. During extreme heat or rain, we shorten outdoor time and focus on safe indoor engagement.")
+                ServiceRow(name: "Quality Time", duration: "60 min", price: "$39.99", details: "A full hour of attentive care. We ensure water/feeding as instructed, light home care (packages/mail), and meaningful enrichment time for a happier pet.")
+                ServiceRow(name: "Walk & Play", duration: "120 min", price: "$75.00", details: "Two hours of balanced exercise and enrichment. Includes an extended walk, playtime, hydration check, and tailored activities to match your pet's energy level—ideal for high‑energy dogs or special days.")
+            }
+            .padding()
         }
+        .background(
+            LinearGradient(
+                colors: [
+                    Color.yellow.opacity(0.1),
+                    Color.white.opacity(0.8),
+                    Color.yellow.opacity(0.05)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
         .navigationTitle("Dog Walks")
     }
 }
@@ -160,7 +181,13 @@ struct ServiceRow: View {
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.vertical, 8)
+        .padding()
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.yellow.opacity(0.3), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
     }
 }
 
@@ -170,7 +197,7 @@ struct SavDailyPlan: Identifiable {
     let name: String
     let walksPerMonth: String
     let price: String
-    let perWalkNote: String
+    let SavedNote: String
     let perks: String
     let subscribeURL: URL
 }
@@ -182,20 +209,20 @@ struct SavDailyServicesView: View {
     private let plans: [SavDailyPlan] = [
         .init(name: "Regular",
               walksPerMonth: "12 walks",
-              price: "$250",
-              perWalkNote: "Save $25",
+              price: "$270",
+              SavedNote: "Save $30",
               perks: "1 Free Walk for 12‑day streak",
               subscribeURL: URL(string: "https://square.link/u/mgbPj5FO")!),
         .init(name: "Premium",
               walksPerMonth: "20 walks",
-              price: "$390",
-              perWalkNote: "Save $70",
+              price: "$450",
+              SavedNote: "Save $50",
               perks: "2 Free Walks + Priority Scheduling",
               subscribeURL: URL(string: "https://square.link/u/hMLzIXzK")!),
         .init(name: "Unlimited",
               walksPerMonth: "30 walks",
-              price: "$550",
-              perWalkNote: "Save $140",
+              price: "$675",
+              SavedNote: "Save $75",
               perks: "3 Free Walks + Surprise Gift",
               subscribeURL: URL(string: "https://square.link/u/pYJ08RLc")!)
     ]
@@ -217,13 +244,13 @@ struct SavDailyServicesView: View {
 
     private var header: some View {
         ZStack(alignment: .leading) {
-            SPDesignSystem.Colors.goldenGradient(colorScheme)
+            Color.yellow
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             VStack(alignment: .leading, spacing: 6) {
                 Text("Choose Your Plan")
                     .font(SPDesignSystem.Typography.heading1())
                     .foregroundColor(SPDesignSystem.Colors.dark)
-                Text("Flexible monthly walking bundles designed around your pet’s routine.")
+                Text("Flexible monthly walking bundles designed around your pet's routine.")
                     .font(SPDesignSystem.Typography.body())
                     .foregroundColor(.black.opacity(0.75))
             }
@@ -252,7 +279,7 @@ private struct SavDailyPlanCard: View {
                 HStack {
                     label(title: "Walks / Month", value: plan.walksPerMonth)
                     Spacer()
-                    label(title: "Per Walk", value: plan.perWalkNote)
+                    label(title: "Saved", value: plan.SavedNote)
                 }
                 Text(plan.perks)
                     .font(.subheadline).bold()
@@ -263,8 +290,11 @@ private struct SavDailyPlanCard: View {
                 } label: {
                     Text("Subscribe")
                         .frame(maxWidth: .infinity)
+                        .foregroundColor(.black)
                 }
-                .buttonStyle(PrimaryButtonStyle())
+                .background(Color.yellow)
+                .cornerRadius(14)
+                .buttonStyle(PlainButtonStyle())
             }
         }
     }

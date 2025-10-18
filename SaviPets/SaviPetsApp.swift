@@ -6,10 +6,12 @@
 //
 
 import SwiftUI
-import SwiftData
 import FirebaseCore
 import GoogleSignIn
 import UIKit
+
+// Note: FirebaseAnalytics, FirebaseRemoteConfig, and FirebasePerformance
+// are imported in their respective manager classes (AnalyticsManager, RemoteConfigManager, PerformanceMonitor)
 
 class AppDelegate: NSObject, UIApplicationDelegate {
 	func application(_ application: UIApplication,
@@ -26,6 +28,14 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 		// Request notification permission
 		Task {
 			await NotificationService.shared.requestNotificationPermission()
+		}
+		
+		// Initialize Performance Monitoring
+		PerformanceMonitor.trackAppStart()
+		
+		// Initialize Remote Config
+		Task {
+			await RemoteConfigManager.shared.fetchAndActivate()
 		}
 
 		return true
@@ -56,9 +66,15 @@ struct SaviPetsApp: App {
 
 	var body: some Scene {
 		WindowGroup {
-			SavSplash()
-				.environmentObject(appState)
-                .environmentObject(appState.chatService)
+			ErrorBoundary {
+				if RemoteConfigManager.shared.isMaintenanceMode {
+					MaintenanceModeView(config: RemoteConfigManager.shared)
+				} else {
+					SavSplash()
+						.environmentObject(appState)
+						.environmentObject(appState.chatService)
+				}
+			}
 		}
 	}
 }

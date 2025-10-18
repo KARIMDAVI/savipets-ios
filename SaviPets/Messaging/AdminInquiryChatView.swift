@@ -1,6 +1,7 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseCore
+import OSLog
 
 struct AdminInquiryChatView: View {
     var initialText: String? = nil
@@ -9,6 +10,11 @@ struct AdminInquiryChatView: View {
     @EnvironmentObject var appState: AppState // Get role from app state if not provided
     @State private var selectedTab: Int = 0 // 0 = Clients, 1 = Sitters
     @State private var selectedConversationId: String? = nil
+    @State private var isCleaningUp: Bool = false
+    @State private var cleanupMessage: String? = nil
+    @State private var showingConversationManagement: Bool = false
+    @State private var conversationToDelete: Conversation? = nil
+    @State private var showingDeleteAlert: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -27,17 +33,35 @@ struct AdminInquiryChatView: View {
                 if isAdminView {
                     // Admin view: show filtered conversations
                     List {
-                        Section("Conversations") {
+                        Section {
                             ForEach(filteredConversations) { convo in
-                                Button(action: { selectedConversationId = convo.id }) {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(conversationTitle(convo))
-                                            .font(.headline)
-                                        Text(convo.lastMessage)
-                                            .font(.subheadline)
-                                            .foregroundColor(.secondary)
-                                    }
+                                ConversationRow(
+                                    conversation: convo,
+                                    conversationTitle: conversationTitle(convo),
+                                    hasUnreadMessages: hasUnreadMessages(convo),
+                                    onTap: { selectedConversationId = convo.id },
+                                    onDelete: { conversationToDelete = convo; showingDeleteAlert = true }
+                                )
+                            }
+                        } header: {
+                            HStack {
+                                Text("Conversations")
+                                Spacer()
+                                // Individual conversation management
+                                Button(action: showConversationManagement) {
+                                    Image(systemName: "ellipsis.circle")
+                                        .font(.system(size: 16, weight: .medium))
+                                        .foregroundColor(.blue)
                                 }
+                            }
+                        }
+                        
+                        // Show cleanup message if any
+                        if let message = cleanupMessage {
+                            Section {
+                                Text(message)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
                         }
                     }
@@ -65,6 +89,18 @@ struct AdminInquiryChatView: View {
                     // Fallback on earlier versions
                 }
             }
+            .alert("Delete Conversation", isPresented: $showingDeleteAlert) {
+                Button("Cancel", role: .cancel) {
+                    conversationToDelete = nil
+                }
+                Button("Delete", role: .destructive) {
+                    if let conversation = conversationToDelete {
+                        deleteConversation(conversation)
+                    }
+                }
+            } message: {
+                Text("Are you sure you want to delete this conversation? This action cannot be undone.")
+            }
         }
     }
 
@@ -75,7 +111,33 @@ struct AdminInquiryChatView: View {
     
     private var filteredConversations: [Conversation] {
         let role = selectedTab == 0 ? UserRole.petOwner : UserRole.petSitter
-        return chat.conversations.filter { $0.participantRoles.contains(role) }
+        
+        // Filter conversations by role AND unread status
+        var filtered = chat.conversations.filter { conversation in
+            let hasRole = conversation.participantRoles.contains(role)
+            let hasUnread = hasUnreadMessages(conversation)
+            
+            // For admin view: show conversations with unread messages OR recent activity
+            // This ensures admin sees both pet owner and sitter messages
+            if isAdminView {
+                return hasRole && (hasUnread || isRecentConversation(conversation))
+            }
+            
+            return hasRole && hasUnread
+        }
+        
+        // Sort by most recent first
+        filtered.sort { conv1, conv2 in
+            conv1.lastMessageAt > conv2.lastMessageAt
+        }
+        
+        return filtered
+    }
+    
+    // Helper function to determine if conversation is recent (within last 24 hours)
+    private func isRecentConversation(_ conversation: Conversation) -> Bool {
+        let twentyFourHoursAgo = Date().addingTimeInterval(-24 * 60 * 60)
+        return conversation.lastMessageAt > twentyFourHoursAgo
     }
 
     private func conversationTitle(_ convo: Conversation) -> String {
@@ -93,6 +155,55 @@ struct AdminInquiryChatView: View {
         } else {
             // For users: show "Support" or "Admin"
             return "Support"
+        }
+    }
+    
+    private func hasUnreadMessages(_ conversation: Conversation) -> Bool {
+        guard let currentUserId = Auth.auth().currentUser?.uid else { return false }
+        
+        // Check if there are unread messages for current user
+        if let unreadCount = conversation.unreadCounts[currentUserId], unreadCount > 0 {
+            return true
+        }
+        
+        // Fallback: check lastReadTimestamp vs lastMessageAt
+        if let lastRead = conversation.lastReadTimestamps[currentUserId] {
+            return conversation.lastMessageAt > lastRead
+        }
+        
+        // If no read timestamp exists, consider it unread
+        return true
+    }
+    
+    private func showConversationManagement() {
+        showingConversationManagement = true
+    }
+    
+    private func deleteConversation(_ conversation: Conversation) {
+        isCleaningUp = true
+        cleanupMessage = nil
+        
+        Task {
+            do {
+                try await chat.deleteConversation(conversation.id)
+                await MainActor.run {
+                    isCleaningUp = false
+                    cleanupMessage = "✓ Conversation deleted successfully"
+                    conversationToDelete = nil
+                    
+                    // Clear message after 3 seconds
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        cleanupMessage = nil
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    isCleaningUp = false
+                    cleanupMessage = "✗ Delete failed: \(error.localizedDescription)"
+                    AppLogger.ui.error("Delete failed: \(error.localizedDescription)")
+                    conversationToDelete = nil
+                }
+            }
         }
     }
 }
@@ -115,108 +226,175 @@ private struct UserAdminChatView: View {
         adminConversation?.id ?? currentConversationId
     }
     
-    var body: some View {
-        VStack(spacing: 0) {
-            // Messages area
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    if let conversationId = activeConversationId,
-                       let messages = chat.messages[conversationId], !messages.isEmpty {
-                        ForEach(messages) { message in
-                            MessageBubble(message: message, displayName: chat.displayName(for: message.senderId))
-                        }
-                    } else {
-                        VStack(spacing: 8) {
-                            Image(systemName: "message.circle")
-                                .font(.system(size: 48))
-                                .foregroundColor(.secondary)
-                            Text("No messages yet")
-                                .font(.headline)
-                                .foregroundColor(.secondary)
-                            Text("Send a message to get started!")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(.vertical, 40)
-                    }
-                }
-                .padding()
+    // MARK: - Modern Welcome Header
+    
+    private var modernWelcomeHeader: some View {
+        VStack(spacing: 20) {
+            // Icon with SaviPets yellow styling
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [SPDesignSystem.Colors.chatYellow.opacity(0.15), SPDesignSystem.Colors.chatYellow.opacity(0.25)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 80, height: 80)
+                    .shadow(color: SPDesignSystem.Colors.chatYellow.opacity(0.2), radius: 10, x: 0, y: 5)
+                
+                Image(systemName: "headphones.circle.fill")
+                    .font(.system(size: 40))
+                    .foregroundColor(SPDesignSystem.Colors.chatYellow)
             }
             
-            // Message input - always show, create conversation if needed
+            VStack(spacing: 8) {
+                Text("Welcome to SaviPets Support")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundColor(.primary)
+                
+                Text("We're here to help you with any questions about your pet care needs. Feel free to ask us anything!")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(nil)
+            }
+            
+            // Quick action buttons
+            VStack(spacing: 12) {
+                HStack(spacing: 12) {
+                    AdminQuickActionButton(
+                        icon: "calendar",
+                        title: "Book Service",
+                        action: { messageText = "I'd like to book a service for my pet" }
+                    )
+                    
+                    AdminQuickActionButton(
+                        icon: "questionmark.circle",
+                        title: "Ask Question",
+                        action: { messageText = "I have a question about..." }
+                    )
+                }
+                
+                HStack(spacing: 12) {
+                    AdminQuickActionButton(
+                        icon: "star",
+                        title: "Rate Service",
+                        action: { messageText = "I'd like to rate my recent service" }
+                    )
+                    
+                    AdminQuickActionButton(
+                        icon: "exclamationmark.triangle",
+                        title: "Report Issue",
+                        action: { messageText = "I need to report an issue" }
+                    )
+                }
+            }
+        }
+        .padding(.vertical, 32)
+        .padding(.horizontal, 24)
+        .background(
+            RoundedRectangle(cornerRadius: 20)
+                .fill(Color(.systemGray6).opacity(0.6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20)
+                        .stroke(Color(.systemGray5), lineWidth: 0.5)
+                )
+        )
+        .padding(.horizontal, 16)
+    }
+    
+    var body: some View {
+        ZStack {
+            // Modern gradient background
+            LinearGradient(
+                colors: [
+                    Color(.systemGray6),
+                    Color(.systemBackground)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+            
+            // Messages area with modern styling
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    // Welcome header for first-time users
+                    if let conversationId = activeConversationId,
+                       let messages = chat.messages[conversationId], messages.isEmpty {
+                        modernWelcomeHeader
+                            .padding(.top, 20)
+                    }
+                    
+                    if let conversationId = activeConversationId,
+                       let messages = chat.messages[conversationId], !messages.isEmpty {
+                        ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                            // ✨ NEW: Modern MessageBubble component
+                            MessageBubble(
+                                message: message,
+                                isFromCurrentUser: message.senderId == Auth.auth().currentUser?.uid,
+                                senderName: message.senderId == Auth.auth().currentUser?.uid ? nil : "Admin",
+                                showAvatar: shouldShowAvatar(at: index, messages: messages),
+                                showTimestamp: shouldShowTimestamp(at: index, messages: messages)
+                            )
+                        }
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
+            }
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+        }
+        // ✅ FIX: Use safeAreaInset for keyboard-safe input bar
+        .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
                 if isLoading {
-                    HStack {
+                    HStack(spacing: 12) {
                         ProgressView()
                             .scaleEffect(0.8)
                         Text("Setting up chat...")
+                            .font(.system(size: 16, weight: .medium))
                             .foregroundColor(.secondary)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding()
+                    .padding(.vertical, 16)
                     .background(Color(.systemGray6))
                 } else if let conversationId = activeConversationId {
-                    MessageInputView(
-                        text: $messageText,
+                    // ✨ NEW: Modern MessageInputBar component
+                    MessageInputBar(
+                        messageText: $messageText,
                         onSend: {
                             Task {
                                 try? await chat.sendMessageSmart(conversationId: conversationId, text: messageText)
                                 messageText = ""
                             }
-                        }
+                        },
+                        showAttachButton: false
                     )
                 } else {
-                    // Fallback: show a message input that creates conversation on send
-                    VStack(spacing: 12) {
-                        HStack(alignment: .bottom, spacing: 12) {
-                            VStack(spacing: 0) {
-                                TextField("Type your message...", text: $messageText, axis: .vertical)
-                                    .textFieldStyle(.plain)
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 12)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 20)
-                                            .fill(Color(.systemGray6))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 20)
-                                                    .stroke(Color(.systemGray4), lineWidth: 1)
-                                            )
-                                    )
-                                    .lineLimit(1...4)
+                    // Fallback: show modern input that creates conversation on send
+                    MessageInputBar(
+                        messageText: $messageText,
+                        onSend: {
+                            let messageToSend = messageText
+                            messageText = ""
+                            Task {
+                                await sendMessageDirectly(messageToSend)
                             }
-                            
-                            Button(action: {
-                                let messageToSend = messageText
-                                DLog.log("SEND tapped", messageToSend)
-                                
-                                // SIMPLE TEST: Just clear the text field to see if button works
-                                messageText = ""
-                                DLog.log("Text field cleared")
-                                
-                                // Now try to send the message with the original text
-                                Task {
-                                    await sendMessageDirectly(messageToSend)
-                                }
-                            }) {
-                                Image(systemName: "paperplane.fill")
-                                    .foregroundColor(.white)
-                                    .frame(width: 36, height: 36)
-                                    .background(
-                                        Circle()
-                                            .fill(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 
-                                                  Color(.systemGray4) : Color.accentColor)
-                                    )
-                            }
-                            .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
-                    }
-                    .padding()
+                        },
+                        showAttachButton: false
+                    )
                 }
             }
         }
+        .navigationTitle("SaviPets Support")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(.visible, for: .navigationBar)
         .onChange(of: adminConversation?.id) { newId in
             if let id = newId {
-                DLog.log("Admin conversation changed", id ?? "nil")
+                DLog.log("Admin conversation changed", id)  // Nil coalescing fix: id is non-optional String
                 chat.listenToMessages(conversationId: id)
                 currentConversationId = id
             }
@@ -322,10 +500,170 @@ private struct UserAdminChatView: View {
             }
         }
     }
+    
+    // MARK: - Helper functions for smart avatar/timestamp display
+    
+    private func shouldShowAvatar(at index: Int, messages: [ChatMessage]) -> Bool {
+        guard index < messages.count else { return true }
+        let message = messages[index]
+        
+        // Always show for first message
+        if index == 0 { return true }
+        
+        // Show if sender changed from previous message
+        if index > 0 && messages[index - 1].senderId != message.senderId {
+            return true
+        }
+        
+        // Show if time gap > 5 minutes from previous message
+        if index > 0 {
+            let timeDiff = message.timestamp.timeIntervalSince(messages[index - 1].timestamp)
+            if timeDiff > 300 { return true }
+        }
+        
+        return false
+    }
+    
+    private func shouldShowTimestamp(at index: Int, messages: [ChatMessage]) -> Bool {
+        guard index < messages.count else { return false }
+        
+        // Show for last message
+        if index == messages.count - 1 { return true }
+        
+        // Show if next message is from different sender
+        if index < messages.count - 1 && messages[index + 1].senderId != messages[index].senderId {
+            return true
+        }
+        
+        // Show if time gap > 5 minutes to next message
+        if index < messages.count - 1 {
+            let timeDiff = messages[index + 1].timestamp.timeIntervalSince(messages[index].timestamp)
+            if timeDiff > 300 { return true }
+        }
+        
+        return false
+    }
 }
 
-// Simple message bubble view
-private struct MessageBubble: View {
+// MARK: - Conversation Row Component
+
+private struct ConversationRow: View {
+    let conversation: Conversation
+    let conversationTitle: String
+    let hasUnreadMessages: Bool
+    let onTap: () -> Void
+    let onDelete: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                // Unread indicator
+                Circle()
+                    .fill(hasUnreadMessages ? Color.blue : Color.clear)
+                    .frame(width: 10, height: 10)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(conversationTitle)
+                        .font(hasUnreadMessages ? .headline : .subheadline)
+                        .fontWeight(hasUnreadMessages ? .semibold : .regular)
+                        .foregroundColor(.primary)
+                    
+                    Text(conversation.lastMessage)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+                
+                Spacer()
+                
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(timeAgo(from: conversation.lastMessageAt))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    
+                    if hasUnreadMessages {
+                        Image(systemName: "circle.fill")
+                            .font(.system(size: 8))
+                            .foregroundColor(.blue)
+                    }
+                }
+                
+                // Delete button
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 14))
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private func timeAgo(from date: Date) -> String {
+        let now = Date()
+        let timeInterval = now.timeIntervalSince(date)
+        
+        if timeInterval < 60 {
+            return "Just now"
+        } else if timeInterval < 3600 {
+            let minutes = Int(timeInterval / 60)
+            return "\(minutes)m ago"
+        } else if timeInterval < 86400 {
+            let hours = Int(timeInterval / 3600)
+            return "\(hours)h ago"
+        } else {
+            let days = Int(timeInterval / 86400)
+            return "\(days)d ago"
+        }
+    }
+}
+
+// MARK: - Quick Action Button Component
+
+private struct AdminQuickActionButton: View {
+    let icon: String
+    let title: String
+    let action: () -> Void
+    @State private var isPressed = false
+    
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundColor(.blue)
+                
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.primary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(.systemGray5))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color(.systemGray4), lineWidth: 0.5)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isPressed ? 0.95 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isPressed)
+        .onLongPressGesture(minimumDuration: 0.0, pressing: { pressing in
+            isPressed = pressing
+        }, perform: {})
+    }
+}
+
+// Simple message bubble view (legacy - specific to admin inquiry)
+// DEPRECATED: Kept for compatibility, can be removed after testing
+private struct AdminMessageBubble: View {
     let message: ChatMessage
     let displayName: String
     

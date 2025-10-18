@@ -19,6 +19,14 @@ service cloud.firestore {
     function isParticipant(conversationId) {
       return get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants.hasAny([request.auth.uid]);
     }
+    
+    // Content validation for messages (XSS prevention)
+    function isValidMessage(text) {
+      return text is string 
+        && text.size() <= 1000 
+        && !text.matches('.*<script.*>.*</script>.*')
+        && !text.matches('.*javascript:.*');
+    }
 
     // 1) Canonical user profile (top-level)
     // Each user can read/write their own profile; admins can read any profile
@@ -62,11 +70,55 @@ service cloud.firestore {
 
     // 5) Service Bookings
     // Users can create and read their own bookings; admins can read all and update statuses.
+    // Allows clients to cancel, sitters to update status/timeline, admins to do everything
     match /serviceBookings/{bookingId} {
       allow create: if isSignedIn() && request.resource.data.clientId == request.auth.uid;
-      allow read: if isSignedIn() && (resource.data.clientId == request.auth.uid || hasRole('admin'));
-      allow update: if isAdmin() || (isSignedIn() && resource.data.clientId == request.auth.uid);
-      allow delete: if hasRole('admin');
+      
+      allow read: if isSignedIn() && (
+        resource.data.clientId == request.auth.uid || 
+        resource.data.sitterId == request.auth.uid || 
+        isAdmin()
+      );
+      
+      // Allow list/query operations for users to find their bookings
+      allow list: if isSignedIn();
+      
+      allow update: if isAdmin() 
+                  // Client can cancel their own bookings
+                  || (isSignedIn() 
+                      && resource.data.clientId == request.auth.uid 
+                      && request.resource.data.status == "cancelled"
+                      && 'canceledBy' in request.resource.data.keys()
+                      && request.resource.data.canceledBy == "owner")
+                  // Client can reschedule their own bookings (Phase 1 enhancement)
+                  || (isSignedIn() 
+                      && resource.data.clientId == request.auth.uid 
+                      && request.resource.data.status == resource.data.status
+                      && request.resource.data.diff(resource.data).affectedKeys().hasAll(['scheduledDate', 'scheduledTime', 'rescheduledFrom', 'rescheduledAt', 'rescheduledBy', 'rescheduleReason', 'lastModified', 'lastModifiedBy', 'modificationReason'])
+                      && request.resource.data.rescheduledBy == request.auth.uid
+                      && 'rescheduleReason' in request.resource.data.keys()
+                      && request.resource.data.rescheduleReason.size() > 0)
+                  // Client can update non-critical fields (notes, etc)
+                  || (isSignedIn() 
+                      && resource.data.clientId == request.auth.uid 
+                      && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'sitterId', 'clientId', 'price', 'scheduledDate', 'scheduledTime', 'rescheduledFrom', 'rescheduledAt', 'rescheduledBy', 'rescheduleReason']))
+                  // Sitter can update status and timeline
+                  || (isSignedIn() 
+                      && resource.data.sitterId == request.auth.uid 
+                      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'lastUpdated', 'timeline', 'checkIn', 'checkOut']));
+      
+      allow delete: if isAdmin();
+    }
+
+    // 5b) Recurring Booking Series
+    // Clients can create and read their own series; admins can manage all
+    match /recurringSeries/{seriesId} {
+      allow create: if isSignedIn() && request.resource.data.clientId == request.auth.uid;
+      allow read: if isSignedIn() && (resource.data.clientId == request.auth.uid || resource.data.assignedSitterId == request.auth.uid || isAdmin());
+      allow update: if isAdmin() 
+                  || (isSignedIn() && resource.data.clientId == request.auth.uid && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['clientId', 'assignedSitterId', 'totalPrice', 'numberOfVisits', 'basePrice']))
+                  || (isSignedIn() && resource.data.assignedSitterId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['completedVisits', 'upcomingVisits', 'canceledVisits']));
+      allow delete: if isAdmin();
     }
 
     // 6) Visits/Clients/Inquiries/Conversations
@@ -76,9 +128,53 @@ service cloud.firestore {
       allow create, update, delete: if isAdmin();
     }
     match /visits/{visitId} {
-      allow read: if isSignedIn();
+      allow read: if isSignedIn() && (
+        resource.data.sitterId == request.auth.uid ||
+        resource.data.clientId == request.auth.uid ||
+        isAdmin()
+      );
+      
+      // Allow list/query for users to find their visits
+      allow list: if isSignedIn();
+      
       allow create, delete: if isAdmin();
-      allow update: if isAdmin() || (isSignedIn() && resource.data.sitterId == request.auth.uid);
+      
+      allow update: if isSignedIn() && (
+        resource.data.sitterId == request.auth.uid ||
+        resource.data.clientId == request.auth.uid ||
+        isAdmin()
+      ) && validateVisitUpdate();
+    }
+    
+    // Validate visit updates to prevent unauthorized field changes
+    function validateVisitUpdate() {
+      let changedFields = request.resource.data.diff(resource.data).affectedKeys();
+      
+      // Sitters can only update specific fields
+      return isAdmin() || (
+        changedFields.hasOnly([
+          'status',
+          'timeline',
+          'startedAt',
+          'lastUpdated',
+          'pendingMessage'
+        ]) && validateTimelineUpdates()
+      );
+    }
+    
+    // Prevent tampering with actualStart once set (only admin can change)
+    function validateTimelineUpdates() {
+      // If timeline.checkIn exists and is being changed (not just created)
+      return !(('timeline' in resource.data 
+        && 'checkIn' in resource.data.timeline
+        && 'checkIn' in request.resource.data.timeline
+        && request.resource.data.timeline.checkIn.timestamp != resource.data.timeline.checkIn.timestamp)
+      ||
+      // Similarly for checkOut
+      ('timeline' in resource.data 
+        && 'checkOut' in resource.data.timeline
+        && 'checkOut' in request.resource.data.timeline
+        && request.resource.data.timeline.checkOut.timestamp != resource.data.timeline.checkOut.timestamp));
     }
 
     match /clients/{clientId} {
@@ -92,11 +188,20 @@ service cloud.firestore {
 
     // Enhanced conversation security
     match /conversations/{conversationId} {
-      allow create: if isSignedIn();
+      // Allow creation if user is authenticated and will be a participant
+      allow create: if isSignedIn() 
+        && request.resource.data.participants.hasAny([request.auth.uid])
+        && request.resource.data.keys().hasAll(['participants', 'participantRoles', 'type', 'status']);
+      
       allow read: if isAdmin() || isParticipant(conversationId);
-      allow update: if isAdmin() || isParticipant(conversationId)
-        && !request.resource.data.diff(resource.data).affectedKeys()
-          .hasAny(['participants', 'participantRoles', 'type']);
+      
+      allow update: if isAdmin() 
+        || (isParticipant(conversationId) 
+            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['participants', 'participantRoles', 'type', 'status']))
+        || (isParticipant(conversationId) 
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['unreadCounts', 'lastReadTimestamps']))
+        || (isAdmin() 
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['autoResponseHistory', 'autoResponderSent', 'adminReplied', 'status']));
       allow delete: if isAdmin();
       
       // Allow users to query conversations where they might be a participant
@@ -106,12 +211,23 @@ service cloud.firestore {
       // Messages subcollection with enhanced security
       match /messages/{messageId} {
         allow read: if isAdmin() || isParticipant(conversationId);
-        allow create: if isSignedIn() && isParticipant(conversationId)
+        
+        // Messages can only be created if:
+        // 1. User is authenticated and is a participant
+        // 2. User is the sender of the message
+        // 3. Conversation is active OR it's an admin inquiry type
+        // 4. Message content is valid (XSS prevention)
+        allow create: if isSignedIn() 
           && request.resource.data.senderId == request.auth.uid
-          && request.resource.data.keys().hasAll(['senderId', 'text', 'timestamp', 'status']);
-        allow update: if isAdmin() || (isParticipant(conversationId) && resource.data.senderId == request.auth.uid)
-          && !request.resource.data.diff(resource.data).affectedKeys()
-            .hasAny(['senderId', 'text', 'timestamp']);
+          && request.resource.data.keys().hasAll(['senderId', 'text', 'timestamp', 'status'])
+          && isValidMessage(request.resource.data.text)
+          && (isAdmin() || isParticipant(conversationId));
+          
+        allow update: if isAdmin() 
+          || (isParticipant(conversationId) && resource.data.senderId == request.auth.uid 
+              && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['senderId', 'text', 'timestamp']))
+          || (isParticipant(conversationId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions']))
+          || (isAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'moderatedBy', 'moderatedAt', 'deliveryStatus', 'deliveredAt']));
         allow delete: if isAdmin();
       }
       
@@ -138,54 +254,25 @@ service cloud.firestore {
       allow write: if isOwner(uid);
     }
     
-    // 10) Enhanced security for new features
-    
-    // Message reactions validation
-    match /conversations/{conversationId}/messages/{messageId} {
-      // Allow users to add/remove reactions only if they're conversation participants
-      allow update: if isSignedIn() && isParticipant(conversationId)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions'])
-        && request.resource.data.reactions.keys().hasAll(['❤️', '👍', '👎', '😂', '😢', '😮']);
+    // 9) Account Deletions (audit trail for scheduled deletions)
+    match /accountDeletions/{deletionId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow delete: if isAdmin();
     }
     
-    // Unread count tracking - only allow updates to own counts
-    match /conversations/{conversationId} {
-      allow update: if isSignedIn() && isParticipant(conversationId)
-        && request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['unreadCounts', 'lastReadTimestamps'])
-        && request.resource.data.unreadCounts.keys().hasAll([request.auth.uid]);
+    // 10) Mail Queue (for Cloud Functions to send emails)
+    match /mail/{mailId} {
+      allow create: if isSignedIn();
+      allow read, update, delete: if false; // Only Cloud Functions can read/update
     }
     
-    // Auto-response history - prevent tampering
-    match /conversations/{conversationId} {
-      allow update: if isSignedIn() && isAdmin()
-        && request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['autoResponseHistory', 'autoResponderSent']);
-    }
-    
-    // Content validation for messages (basic XSS prevention)
-    function isValidMessage(text) {
-      return text is string 
-        && text.size() <= 1000 
-        && !text.matches('.*<script.*>.*</script>.*')
-        && !text.matches('.*javascript:.*');
-    }
-    
-    // Apply content validation to message creation
-    match /conversations/{conversationId}/messages/{messageId} {
-      allow create: if isSignedIn() && isParticipant(conversationId)
-        && isValidMessage(request.resource.data.text)
-        && request.resource.data.senderId == request.auth.uid
-        && request.resource.data.keys().hasAll(['senderId', 'text', 'timestamp', 'status']);
-    }
-    
-    // 11) Admin-only operations
-    match /conversations/{conversationId}/messages/{messageId} {
-      // Only admins can approve/reject messages
-      allow update: if isAdmin() 
-        && request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['status', 'moderatedBy', 'moderatedAt', 'deliveryStatus', 'deliveredAt'])
-        && request.resource.data.status in ['sent', 'rejected', 'pending'];
+    // 11) Notifications Queue (for cancellations, updates, etc.)
+    match /notifications/{notificationId} {
+      allow create: if isSignedIn();
+      allow read: if isSignedIn() && resource.data.recipientId == request.auth.uid;
+      allow update, delete: if false; // Only Cloud Functions can update
     }
     
     // 12) Audit logging (recommended to implement in Cloud Functions)

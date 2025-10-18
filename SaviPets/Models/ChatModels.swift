@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import FirebaseFirestore
 
 // MARK: - Type-Safe Enums
@@ -13,6 +14,38 @@ enum ConversationType: String, Codable, CaseIterable {
         case .adminInquiry: return "Admin Inquiry"
         case .clientSitter: return "Client-Sitter"
         case .sitterToClient: return "Sitter to Client"
+        }
+    }
+    
+    var requiresApproval: Bool {
+        switch self {
+        case .sitterToClient, .clientSitter: return true
+        case .adminInquiry: return false
+        }
+    }
+}
+
+enum ConversationStatus: String, Codable, CaseIterable {
+    case pending = "pending"
+    case active = "active"
+    case rejected = "rejected"
+    case archived = "archived"
+    
+    var displayName: String {
+        switch self {
+        case .pending: return "Pending Approval"
+        case .active: return "Active"
+        case .rejected: return "Rejected"
+        case .archived: return "Archived"
+        }
+    }
+    
+    var color: Color {
+        switch self {
+        case .pending: return .orange
+        case .active: return .green
+        case .rejected: return .red
+        case .archived: return .gray
         }
     }
 }
@@ -63,6 +96,116 @@ enum ModerationType: String, Codable {
     case none = "none"
     case admin = "admin"
     case auto = "auto"
+}
+
+// MARK: - Message Attachment Models
+
+enum AttachmentType: String, Codable {
+    case image = "image"
+    case video = "video"
+    case document = "document"
+    case audio = "audio"
+    
+    var displayName: String {
+        switch self {
+        case .image: return "Image"
+        case .video: return "Video"
+        case .document: return "Document"
+        case .audio: return "Audio"
+        }
+    }
+    
+    var iconName: String {
+        switch self {
+        case .image: return "photo"
+        case .video: return "video"
+        case .document: return "doc"
+        case .audio: return "waveform"
+        }
+    }
+}
+
+struct MessageAttachment: Codable, Identifiable {
+    let id: String
+    let type: AttachmentType
+    let url: String
+    let fileName: String
+    let fileSize: Int64 // in bytes
+    let mimeType: String
+    let thumbnailUrl: String? // For images/videos
+    let uploadedAt: Date
+    let uploadedBy: String
+    
+    init(id: String = UUID().uuidString, type: AttachmentType, url: String, fileName: String, fileSize: Int64, mimeType: String, thumbnailUrl: String? = nil, uploadedAt: Date = Date(), uploadedBy: String) {
+        self.id = id
+        self.type = type
+        self.url = url
+        self.fileName = fileName
+        self.fileSize = fileSize
+        self.mimeType = mimeType
+        self.thumbnailUrl = thumbnailUrl
+        self.uploadedAt = uploadedAt
+        self.uploadedBy = uploadedBy
+    }
+    
+    // Custom decoder for Firestore
+    init?(from data: [String: Any]) {
+        guard let id = data["id"] as? String,
+              let typeString = data["type"] as? String,
+              let type = AttachmentType(rawValue: typeString),
+              let url = data["url"] as? String,
+              let fileName = data["fileName"] as? String,
+              let fileSize = data["fileSize"] as? Int64,
+              let mimeType = data["mimeType"] as? String,
+              let uploadedBy = data["uploadedBy"] as? String else {
+            return nil
+        }
+        
+        self.id = id
+        self.type = type
+        self.url = url
+        self.fileName = fileName
+        self.fileSize = fileSize
+        self.mimeType = mimeType
+        self.thumbnailUrl = data["thumbnailUrl"] as? String
+        self.uploadedBy = uploadedBy
+        
+        // Handle timestamp
+        if let timestamp = data["uploadedAt"] as? Timestamp {
+            self.uploadedAt = timestamp.dateValue()
+        } else if let date = data["uploadedAt"] as? Date {
+            self.uploadedAt = date
+        } else {
+            self.uploadedAt = Date()
+        }
+    }
+    
+    var fileSizeFormatted: String {
+        let bytes = Double(fileSize)
+        if bytes < 1024 {
+            return "\(Int(bytes)) B"
+        } else if bytes < 1024 * 1024 {
+            return String(format: "%.1f KB", bytes / 1024)
+        } else if bytes < 1024 * 1024 * 1024 {
+            return String(format: "%.1f MB", bytes / (1024 * 1024))
+        } else {
+            return String(format: "%.1f GB", bytes / (1024 * 1024 * 1024))
+        }
+    }
+}
+
+enum SignInProvider: String, Codable {
+    case email = "password"
+    case google = "google.com"
+    case apple = "apple.com"
+    
+    var displayName: String {
+        switch self {
+        case .email: return "Email"
+        case .google: return "Google"
+        case .apple: return "Apple"
+        }
+    }
 }
 
 enum UserRole: String, Codable, CaseIterable {
@@ -158,7 +301,7 @@ struct Conversation: Identifiable, Codable {
     let participantRoles: [UserRole]
     let lastMessage: String
     let lastMessageAt: Date
-    let status: String // "active" | "archived"
+    let status: ConversationStatus
     let createdAt: Date
     let type: ConversationType
     let isPinned: Bool
@@ -172,7 +315,7 @@ struct Conversation: Identifiable, Codable {
     let unreadCounts: [String: Int] // userId: count
     let lastReadTimestamps: [String: Date] // userId: lastReadAt
     
-    init(id: String, participants: [String], participantRoles: [UserRole], lastMessage: String, lastMessageAt: Date, status: String, createdAt: Date, type: ConversationType, isPinned: Bool = false, pinnedName: String? = nil, autoResponseHistory: [String: Date] = [:], autoResponseCooldown: TimeInterval = 86400, adminReplied: Bool = false, conversationKey: String? = nil, unreadCounts: [String: Int] = [:], lastReadTimestamps: [String: Date] = [:]) {
+    init(id: String, participants: [String], participantRoles: [UserRole], lastMessage: String, lastMessageAt: Date, status: ConversationStatus, createdAt: Date, type: ConversationType, isPinned: Bool = false, pinnedName: String? = nil, autoResponseHistory: [String: Date] = [:], autoResponseCooldown: TimeInterval = 86400, adminReplied: Bool = false, conversationKey: String? = nil, unreadCounts: [String: Int] = [:], lastReadTimestamps: [String: Date] = [:]) {
         self.id = id
         self.participants = participants
         self.participantRoles = participantRoles
@@ -198,7 +341,7 @@ struct Conversation: Identifiable, Codable {
         guard let participants = data["participants"] as? [String],
               let participantRoleStrings = data["participantRoles"] as? [String],
               let lastMessage = data["lastMessage"] as? String,
-              let status = data["status"] as? String,
+              let statusString = data["status"] as? String,
               let typeString = data["type"] as? String,
               let type = ConversationType(rawValue: typeString) else {
             return nil
@@ -208,7 +351,7 @@ struct Conversation: Identifiable, Codable {
         self.participants = participants
         self.participantRoles = participantRoleStrings.compactMap { UserRole(rawValue: $0) }
         self.lastMessage = lastMessage
-        self.status = status
+        self.status = ConversationStatus(rawValue: statusString) ?? .active
         self.type = type
         self.isPinned = data["isPinned"] as? Bool ?? false
         self.pinnedName = data["pinnedName"] as? String
@@ -288,7 +431,7 @@ struct ChatMessage: Identifiable, Codable {
     let isAutoResponse: Bool
     
     // Enhanced delivery tracking
-    let deliveryStatus: DeliveryStatus
+    let deliveryStatus: String  // "sent" | "delivered" | "read"
     let deliveredAt: Date?
     let readAt: Date?
     let readBy: [String: Date] // userId: readAt
@@ -301,7 +444,14 @@ struct ChatMessage: Identifiable, Codable {
     let lastRetryAt: Date?
     let failureReason: String?
     
-    init(id: String, senderId: String, text: String, timestamp: Date, read: Bool = false, status: MessageStatus = .sent, moderationType: ModerationType = .none, moderatedBy: String? = nil, moderatedAt: Date? = nil, isAutoResponse: Bool = false, deliveryStatus: DeliveryStatus = .sending, deliveredAt: Date? = nil, readAt: Date? = nil, readBy: [String: Date] = [:], reactions: [String: [String]] = [:], retryCount: Int = 0, lastRetryAt: Date? = nil, failureReason: String? = nil) {
+    // Display information
+    let senderName: String?
+    let isFromAdmin: Bool
+    
+    // Attachments
+    let attachments: [MessageAttachment]
+    
+    init(id: String, senderId: String, text: String, timestamp: Date, read: Bool = false, status: MessageStatus = .sent, moderationType: ModerationType = .none, moderatedBy: String? = nil, moderatedAt: Date? = nil, isAutoResponse: Bool = false, deliveryStatus: String = "sent", deliveredAt: Date? = nil, readAt: Date? = nil, readBy: [String: Date] = [:], reactions: [String: [String]] = [:], retryCount: Int = 0, lastRetryAt: Date? = nil, failureReason: String? = nil, senderName: String? = nil, isFromAdmin: Bool = false, attachments: [MessageAttachment] = []) {
         self.id = id
         self.senderId = senderId
         self.text = text
@@ -320,6 +470,9 @@ struct ChatMessage: Identifiable, Codable {
         self.retryCount = retryCount
         self.lastRetryAt = lastRetryAt
         self.failureReason = failureReason
+        self.senderName = senderName
+        self.isFromAdmin = isFromAdmin
+        self.attachments = attachments
     }
     
     // Custom decoder for Firestore data
@@ -356,13 +509,8 @@ struct ChatMessage: Identifiable, Codable {
             self.moderationType = .none
         }
         
-        // Handle delivery status
-        if let deliveryString = data["deliveryStatus"] as? String,
-           let deliveryStatus = DeliveryStatus(rawValue: deliveryString) {
-            self.deliveryStatus = deliveryStatus
-        } else {
-            self.deliveryStatus = .sending
-        }
+        // Handle delivery status (as String for compatibility)
+        self.deliveryStatus = data["deliveryStatus"] as? String ?? "sent"
         
         // Handle timestamps
         if let timestamp = data["timestamp"] as? Timestamp {
@@ -416,6 +564,17 @@ struct ChatMessage: Identifiable, Codable {
         
         // Handle reactions
         self.reactions = data["reactions"] as? [String: [String]] ?? [:]
+        
+        // Handle display information
+        self.senderName = data["senderName"] as? String
+        self.isFromAdmin = data["isFromAdmin"] as? Bool ?? false
+        
+        // Handle attachments
+        var attachments: [MessageAttachment] = []
+        if let attachmentsData = data["attachments"] as? [[String: Any]] {
+            attachments = attachmentsData.compactMap { MessageAttachment(from: $0) }
+        }
+        self.attachments = attachments
     }
     
     // Helper methods
@@ -450,7 +609,10 @@ struct ChatMessage: Identifiable, Codable {
             reactions: newReactions,
             retryCount: retryCount,
             lastRetryAt: lastRetryAt,
-            failureReason: failureReason
+            failureReason: failureReason,
+            senderName: senderName,
+            isFromAdmin: isFromAdmin,
+            attachments: attachments
         )
     }
     
@@ -479,7 +641,10 @@ struct ChatMessage: Identifiable, Codable {
             reactions: newReactions,
             retryCount: retryCount,
             lastRetryAt: lastRetryAt,
-            failureReason: failureReason
+            failureReason: failureReason,
+            senderName: senderName,
+            isFromAdmin: isFromAdmin,
+            attachments: attachments
         )
     }
 }
@@ -529,5 +694,103 @@ struct TypingIndicator: Codable {
         self.userId = userId
         self.isTyping = isTyping
         self.timestamp = timestamp
+    }
+}
+
+// MARK: - Visit Status
+
+enum VisitStatus: String, Codable, CaseIterable {
+    case scheduled = "scheduled"
+    case inAdventure = "in_adventure"
+    case completed = "completed"
+    case cancelled = "cancelled"
+    
+    var displayName: String {
+        switch self {
+        case .scheduled: return "Scheduled"
+        case .inAdventure: return "In Progress"
+        case .completed: return "Completed"
+        case .cancelled: return "Cancelled"
+        }
+    }
+    
+    var isActive: Bool {
+        return self == .inAdventure
+    }
+    
+    var isCompleted: Bool {
+        return self == .completed
+    }
+}
+
+// MARK: - Helper Structs
+
+/// Helper struct for sheet presentation with conversation ID
+struct ChatSheetId: Identifiable {
+    let id: String
+}
+
+// MARK: - Recurring Booking Models
+
+enum PaymentFrequency: String, Codable, CaseIterable {
+    case daily = "daily"
+    case weekly = "weekly"
+    case monthly = "monthly"
+    
+    var displayName: String {
+        switch self {
+        case .daily: return "Daily"
+        case .weekly: return "Weekly"
+        case .monthly: return "Monthly"
+        }
+    }
+    
+    var discountPercentage: Double {
+        switch self {
+        case .daily: return 0.0
+        case .weekly: return 0.0
+        case .monthly: return 0.10 // 10% discount for monthly
+        }
+    }
+}
+
+struct RecurringSeries: Identifiable, Codable {
+    let id: String
+    let clientId: String
+    let serviceType: String
+    let numberOfVisits: Int
+    let frequency: PaymentFrequency
+    let startDate: Date
+    let preferredTime: String
+    let preferredDays: [Int]?
+    let basePrice: Double
+    let totalPrice: Double
+    let pets: [String]
+    let specialInstructions: String?
+    let status: RecurringSeriesStatus
+    let createdAt: Date
+    let assignedSitterId: String?
+    let preferredSitterId: String?
+    let completedVisits: Int
+    let canceledVisits: Int
+    let upcomingVisits: Int
+    let duration: Int
+    
+    enum RecurringSeriesStatus: String, Codable {
+        case pending = "pending"
+        case active = "active"
+        case paused = "paused"
+        case completed = "completed"
+        case canceled = "canceled"
+        
+        var displayName: String {
+            switch self {
+            case .pending: return "Pending"
+            case .active: return "Active"
+            case .paused: return "Paused"
+            case .completed: return "Completed"
+            case .canceled: return "Canceled"
+            }
+        }
     }
 }
